@@ -7,15 +7,17 @@ from fastapi import FastAPI,HTTPException,Request,Response,Depends,Body,Header
 from fastapi.responses import HTMLResponse,StreamingResponse,FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy import func
 from .database import init_db,Session as DBSession
-from .models import PreferredChannel,User,Team,Membership,Source,Rule,Runbook,Event,Ticket,Audit,Activity,Delivery,ChannelState,Proposal,BoardAccess,Policy,now
+from .models import DeletedRule,current_rules,TicketDeliveryPreferences,User,Team,Membership,Source,Rule,Runbook,Event,Ticket,Audit,Activity,Delivery,ChannelState,Proposal,BoardAccess,Policy,now
 from .auth import SIGNER,db_session,current_user,require,require_role,require_debug,is_member,is_manager,is_maintainer,is_guest,can_view_board,can_view_ticket,can_work,can_approve_final,can_approve_resolution
 from .services.conditions import validate,matches,render,canonical
 from .services.runbooks import formats,actions
 from .services.ingestion import ingest
 from .services.routing import pump_events,process_event
-from .services.delivery import queue_ticket,process_deliveries
+from .services.delivery import queue_ticket,process_deliveries,channels,TICKET_CATEGORIES,ticket_channels
 from .services.records import audit,activity
 from .services.config_reload import sign_manifest,validate_manifest
 
@@ -88,7 +90,9 @@ def me(u:User=Depends(current_user),db:Session=Depends(db_session)):
     myteams=[team_dict(db,db.get(Team,m.team_id)) for m in db.query(Membership).filter_by(user_id=u.id)]
     managed=[team_dict(db,t) for t in db.query(Team).filter_by(leader_id=u.id) if t.id not in {x['id'] for x in myteams}]
     guest=[team_dict(db,db.get(Team,g.team_id)) for g in db.query(BoardAccess).filter_by(user_id=u.id,status='approved') if g.team_id not in {x['id'] for x in myteams+managed}]
-    return {**row(u,['id','name','role','email','phone','manager_id','primary_channel','backup_channel','preferred_channels','subscriptions','schedule','buffer_seconds','preset','timezone','debug_enabled']),
+    return {**row(u,['id','name','role','email','phone','manager_id','subscriptions','preset','timezone','debug_enabled']),
+            'ticket_channels':ticket_channels(u),'ticket_categories':TICKET_CATEGORIES,
+            'available_channels':channels.available(u),'policy_channels':channels.labels,
             'teams':myteams+managed,'shared_teams':guest,'is_demo':os.getenv('DEMO_MODE','1')=='1'}
 
 @app.get('/api/teams')
@@ -387,10 +391,55 @@ def unmatched(team:int|None=None,u:User=Depends(current_user),db:Session=Depends
         return any(is_manager(db,u,t) for t in attempted) if u.role=='M' else ev.source_id==db.query(Source).filter_by(slug='demo').first().id
     return [row(e,['id','source_id','raw','received_at','error','route_trace','state']) for e in items if visible(e) and (not team or any(t.get('team_id')==team for t in e.route_trace or []))]
 
+@app.post('/api/unmatched/{event_id}/claim')
+def claim_unmatched(event_id:int,team_id:int=Body(...),category:str=Body(...),u:User=Depends(current_user),db:Session=Depends(db_session)):
+    require(is_manager(db,u,team_id),'Only the team manager can claim events')
+    if category not in TICKET_CATEGORIES:
+        raise HTTPException(422,'Choose a valid ticket type')
+    ticket_type = category if category in ('task','change_request') else 'incident'
+    event = db.get(Event,event_id)
+    if not event:
+        raise HTTPException(404,'Event not found')
+    require(any(entry.get('team_id')==team_id for entry in event.route_trace or []),
+            'Choose a team in the routing trace')
+    claimed = db.query(Event).filter_by(id=event_id,state='unmatched',ticket_id=None).update(
+        {Event.state:'matched'},synchronize_session=False)
+    if not claimed:
+        raise HTTPException(409,'This event is no longer unmatched')
+    normalized = event.normalized or {}
+    fields = normalized.get('flat',{})
+    try:
+        payload = json.loads(event.raw)
+    except ValueError:
+        payload = event.raw
+    snapshot = payload if isinstance(payload,dict) else {'line':payload}
+    occurred = fields.get('canonical.occurredAt')
+    timestamp = datetime.fromisoformat(occurred) if occurred else event.received_at
+    title = f"{normalized.get('schema') or 'Unmatched event'} · Event #{event.id}"
+    ticket = Ticket(team_id=team_id,type=ticket_type,state='new',members=[u.id],
+                    source_id=event.source_id,event_id=event.id,title=title[:250],
+                    severity=category if ticket_type=='incident' else 'info',schema=normalized.get('schema') or '',
+                    environment=fields.get('canonical.environment',''),occurred_at=timestamp,last_occurrence_at=timestamp,
+                    first_payload=snapshot,latest_payload=snapshot,samples=[{'event_id':event.id,'at':timestamp.isoformat()}])
+    db.add(ticket)
+    db.flush()
+    if ticket_type=='change_request':
+        proposal = Proposal(team_id=team_id,requester_id=u.id,target_type='ticket',target_id=ticket.id,
+                            ticket_id=ticket.id,description=title)
+        db.add(proposal)
+        db.flush()
+        audit(db,'change_requested',team_id,ticket.id,u,{'proposal_id':proposal.id})
+    event.ticket_id=ticket.id
+    audit(db,'unmatched_event_claimed',team_id,ticket.id,u,{'event_id':event.id,'category':category})
+    activity(db,team_id,ticket.id,ticket_type,'Claimed unmatched event: '+ticket.title)
+    queue_ticket(db,ticket)
+    db.commit()
+    return ticket_dict(ticket)
+
 @app.get('/api/rules')
 def rules(team:int,u:User=Depends(current_user),db:Session=Depends(db_session)):
     require(can_view_board(db,u,team))
-    return [row(r,['id','team_id','name','description','priority','enabled','condition','presentation','routing','dedup_template','group_template','throttle_seconds','runbook_id','version']) for r in db.query(Rule).filter_by(team_id=team).order_by(Rule.priority,Rule.id)]
+    return [row(r,['id','team_id','name','description','priority','enabled','condition','presentation','routing','dedup_template','group_template','throttle_seconds','runbook_id','version']) for r in current_rules(db).filter_by(team_id=team).order_by(Rule.priority,Rule.id)]
 
 def rule_data(data):
     condition=data.get('condition') or {};validate(condition)
@@ -440,8 +489,8 @@ def create_rule(data:dict=Body(...),u:User=Depends(current_user),db:Session=Depe
 
 @app.put('/api/rules/{rule_id}')
 def edit_rule(rule_id:int,data:dict=Body(...),u:User=Depends(current_user),db:Session=Depends(db_session)):
-    r=db.get(Rule,rule_id)
-    if not r:raise HTTPException(404)
+    r=db.get(Rule,rule_id,with_for_update=True)
+    if not r or db.get(DeletedRule,rule_id):raise HTTPException(404)
     require(is_manager(db,u,r.team_id))
     try:payload=rule_data(data)
     except ValueError as e:raise HTTPException(422,str(e))
@@ -449,10 +498,16 @@ def edit_rule(rule_id:int,data:dict=Body(...),u:User=Depends(current_user),db:Se
     r.version+=1;audit(db,'rule_updated',r.team_id,actor=u,detail={'rule_id':r.id,'version':r.version});db.commit();return {'ok':True}
 
 @app.delete('/api/rules/{rule_id}')
-def delete_rule(rule_id:int,u:User=Depends(current_user),db:Session=Depends(db_session)):
-    r=db.get(Rule,rule_id)
-    if not r:raise HTTPException(404)
-    require(is_manager(db,u,r.team_id));r.enabled=False
+def delete_rule(rule_id:int,permanent:bool=False,u:User=Depends(current_user),db:Session=Depends(db_session)):
+    r=db.get(Rule,rule_id,with_for_update=True)
+    if not r or db.get(DeletedRule,rule_id):raise HTTPException(404)
+    require(is_manager(db,u,r.team_id))
+    r.enabled=False
+    if permanent:
+        db.add(DeletedRule(rule_id=r.id))
+        audit(db,'rule_deleted',r.team_id,actor=u,detail={'rule_id':r.id,'name':r.name})
+        db.commit()
+        return {'ok':True}
     audit(db,'rule_disabled',r.team_id,actor=u,detail={'rule_id':r.id});db.commit();return {'ok':True,'note':'Soft-disabled for history safety'}
 
 @app.get('/api/runbooks')
@@ -525,39 +580,44 @@ def decide_proposal(proposal_id:int,data:dict=Body(...),u:User=Depends(current_u
     db.commit();return {'id':p.id,'status':p.status}
 
 @app.get('/api/delivery')
-def delivery_logs(team:int|None=None,u:User=Depends(current_user),db:Session=Depends(db_session)):
-    q=db.query(Delivery).order_by(Delivery.id.desc()).limit(120)
-    jobs=q.all()
-    return [row(d,['id','ticket_id','user_id','channel','kind','status','content','attempts','available_at','sent_at','last_error','fallback_for']) for d in jobs if d.user_id==u.id or (d.ticket_id and (t:=db.get(Ticket,d.ticket_id)) and is_manager(db,u,t.team_id) and (team is None or t.team_id==team))]
+def delivery_logs(team:int|None=None,page:int|None=None,u:User=Depends(current_user),db:Session=Depends(db_session)):
+    visible = Delivery.user_id == u.id
+    if u.role == 'M':
+        managed = db.query(Ticket.id).join(Team, Team.id==Ticket.team_id).filter(Team.leader_id==u.id)
+        if team is not None:
+            managed = managed.filter(Team.id==team)
+        visible = visible | Delivery.ticket_id.in_(managed)
+    query = db.query(Delivery).filter(visible).order_by(Delivery.id.desc())
+    fields = ['id','ticket_id','user_id','channel','kind','status','content','attempts','available_at','sent_at','last_error','fallback_for']
+    if page is None:
+        return [row(job,fields) for job in query.limit(120)]
+    if page < 1:
+        raise HTTPException(422,'Page must be positive')
+    page_size = 25
+    total = query.order_by(None).count()
+    pages = max(1,(total + page_size - 1)//page_size)
+    page = min(page,pages)
+    jobs = query.offset((page-1)*page_size).limit(page_size)
+    return {'items':[row(job,fields) for job in jobs],'page':page,'pages':pages,'total':total}
 
 @app.put('/api/preferences')
 def preferences(data:dict=Body(...),u:User=Depends(current_user),db:Session=Depends(db_session)):
-    primary=data.get('primary_channel',u.primary_channel)
-    backup=data.get('backup_channel',u.backup_channel)
-    available={'email','sms','phone','ui'}
-    if not isinstance(primary, str) or not isinstance(backup, str) or primary not in available or backup not in available or primary==backup:raise HTTPException(422,'Select two distinct active channels')
-    reserved = {primary, backup}
-    extras = data.get('preferred_channels', [c for c in u.preferred_channels if c not in reserved])
-    if not isinstance(extras, list) or any(not isinstance(c, str) or c not in available - reserved for c in extras):
-        raise HTTPException(422, 'Additional channels must be available and different from primary and backup')
-    selected = reserved.union(extras)
-    if 'email' in selected and not u.email:raise HTTPException(422,'Email address missing')
-    if selected.intersection({'sms', 'phone'}):
-        if not u.phone:raise HTTPException(422,'Phone number missing')
-    existing = {item.channel: item for item in u.extra_channels}
-    u.extra_channels = [existing.get(c) or PreferredChannel(channel=c) for c in sorted(set(extras))]
-    u.primary_channel=primary;u.backup_channel=backup
-    if 'schedule' in data:
-        sch=data['schedule']
-        try:
-            from zoneinfo import ZoneInfo
-            ZoneInfo(str(sch.get('timezone','UTC')))
-            for field in ('start','end'):
-                datetime.strptime(sch.get(field,'00:00'),'%H:%M')
-        except Exception:raise HTTPException(422,'Invalid time or timezone')
-        u.schedule=sch
+    if any(key in data for key in ('primary_channel','backup_channel','preferred_channels','severity_channels')):
+        raise HTTPException(422,'Use ticket_channels to select delivery channels for each ticket category')
+    if 'ticket_channels' in data:
+        mapping = data['ticket_channels']
+        if not isinstance(mapping,dict) or set(mapping) != set(TICKET_CATEGORIES):
+            raise HTTPException(422,'Choose channels for every ticket category')
+        available = channels.available(u)
+        normalized = {}
+        for category, choices in mapping.items():
+            if not isinstance(choices,list) or not choices or any(not isinstance(c,str) or c not in available for c in choices):
+                raise HTTPException(422,f'Select at least one available channel for {TICKET_CATEGORIES[category]}')
+            normalized[category] = sorted(set(choices))
+        if u.delivery_preferences is None:
+            u.delivery_preferences = TicketDeliveryPreferences()
+        u.delivery_preferences.channels = normalized
     if 'subscriptions' in data:u.subscriptions=data['subscriptions']
-    if 'buffer_seconds' in data:u.buffer_seconds=min(3600,max(0,int(data['buffer_seconds'])))
     if 'timezone' in data:
         try:
             from zoneinfo import ZoneInfo
@@ -579,23 +639,53 @@ def policies(team:int,u:User=Depends(current_user),db:Session=Depends(db_session
 def create_policy(data:dict=Body(...),u:User=Depends(current_user),db:Session=Depends(db_session)):
     tid=int(data.get('team_id',0));require(is_manager(db,u,tid))
     channel=data.get('channel')
-    if channel not in ('ui','email','sms','phone'):raise HTTPException(422,'Invalid channel')
-    p=Policy(team_id=tid,severity=str(data.get('severity','critical')),channel=channel,kind=str(data.get('kind','new_ticket')),target=str(data.get('target','all')),ignore_schedule=bool(data.get('ignore_schedule',False)))
+    if not isinstance(channel,str) or channel not in channels.senders:raise HTTPException(422,'Invalid channel')
+    category=data.get('severity','critical')
+    if category not in (*TICKET_CATEGORIES,'all'):raise HTTPException(422,'Invalid ticket type')
+    p=Policy(team_id=tid,severity=category,channel=channel,kind=str(data.get('kind','new_ticket')),target=str(data.get('target','all')),ignore_schedule=bool(data.get('ignore_schedule',False)))
     db.add(p);audit(db,'policy_created',tid,actor=u);db.commit();return {'ok':True}
+
+@app.delete('/api/policies/{policy_id}')
+def delete_policy(policy_id:int,u:User=Depends(current_user),db:Session=Depends(db_session)):
+    policy = db.get(Policy, policy_id)
+    if not policy:
+        raise HTTPException(404, 'Policy not found')
+    tid = policy.team_id
+    require(is_manager(db,u,tid))
+    db.get(Team, tid, with_for_update=True)
+    other = db.query(Policy.id).filter(Policy.team_id==tid, Policy.id!=policy_id).exists()
+    removed = db.query(Policy).filter(Policy.id==policy_id, other).delete(synchronize_session=False)
+    if not removed:
+        raise HTTPException(409, 'Keep at least one mandatory team policy')
+    audit(db,'policy_deleted',tid,actor=u,detail={'policy_id':policy_id,'channel':policy.channel})
+    db.commit()
+    return {'ok':True}
 
 @app.get('/api/organization')
 def organization(u:User=Depends(current_user),db:Session=Depends(db_session)):
     boss=db.get(User,u.manager_id) if u.manager_id else None
-    reports=db.query(User).filter_by(manager_id=u.id).all()
-    def summary(x):return {'id':x.id,'name':x.name,'role':x.role,'email':x.email,'team_ids':[m.team_id for m in db.query(Membership).filter_by(user_id=x.id)],'direct_reports':db.query(User).filter_by(manager_id=x.id).count()}
-    return {'manager':summary(boss) if boss else None,'reports':[summary(e) for e in reports]}
+    def direct_reports(manager_id):
+        members = (db.query(Membership.user_id).join(Team,Team.id==Membership.team_id)
+                   .filter(Team.leader_id==manager_id))
+        return db.query(User).filter(User.id!=manager_id,User.id.in_(members))
+    reports=direct_reports(u.id).order_by(User.name).all()
+    def summary(x):return {'id':x.id,'name':x.name,'role':x.role,'email':x.email,'team_ids':[m.team_id for m in db.query(Membership).filter_by(user_id=x.id)],'direct_reports':direct_reports(x.id).count()}
+    managed = db.query(Team).filter_by(leader_id=u.id).order_by(Team.name).all() if u.role=='M' else []
+    employees = db.query(User.id,User.name).filter_by(role='E',debug_enabled=False).order_by(User.name).all() if managed else []
+    return {'managed_teams':[team_dict(db,team) for team in managed],
+            'employees':[{'id':emp.id,'name':emp.name} for emp in employees],
+            'manager':summary(boss) if boss else None,'reports':[summary(e) for e in reports]}
 
 @app.post('/api/teams/{team_id}/members')
 def member_manage(team_id:int,data:dict=Body(...),u:User=Depends(current_user),db:Session=Depends(db_session)):
-    require(is_manager(db,u,team_id))
+    team = db.get(Team,team_id,with_for_update=True)
+    if not team:raise HTTPException(404,'Team not found')
+    require(u.role=='A' or is_manager(db,u,team_id))
     user_id=int(data.get('user_id',0));target=db.get(User,user_id)
     if not target:raise HTTPException(404)
     action=data.get('action','add')
+    if action=='remove' and target.id==team.leader_id:
+        raise HTTPException(409,'The team leader must remain on the team')
     m=db.get(Membership,(user_id,team_id))
     if action=='add' and not m:db.add(Membership(user_id=user_id,team_id=team_id,maintainer=False))
     elif action=='remove' and m:db.delete(m)
@@ -636,10 +726,60 @@ def admin(u:User=Depends(current_user),db:Session=Depends(db_session)):
         return record
     return {'sources':[source_info(s) for s in db.query(Source)],
             'teams':[team_dict(db,t) for t in db.query(Team)],
+            'staff':[row(person,['id','name','role']) for person in db.query(User)
+                     .filter(User.role.in_(['E','M']),User.debug_enabled==False).order_by(User.name)],
             'metrics':{'events':db.query(Event).count(),'matched':db.query(Event).filter_by(state='matched').count(),
                        'unmatched':db.query(Event).filter_by(state='unmatched').count(),'pending':db.query(Event).filter_by(state='pending').count(),
                        'rejected':db.query(Event).filter_by(state='rejected').count(),'tickets':db.query(Ticket).count(),
                        'deliveries_retrying':db.query(Delivery).filter_by(status='retrying').count()}}
+
+class ManagerAssignment(BaseModel):
+    user_id: int
+    previous_leader_id: int
+
+
+@app.put('/api/admin/teams/{team_id}/manager')
+def assign_team_manager(team_id:int,data:ManagerAssignment,u:User=Depends(current_user),db:Session=Depends(db_session)):
+    require_role(u,'A')
+    team = db.get(Team,team_id,with_for_update=True)
+    if not team:raise HTTPException(404,'Team not found')
+    employee = db.get(User,data.user_id,with_for_update=True)
+    if not employee:raise HTTPException(404,'Employee not found')
+    if employee.role not in ('E','M') or employee.debug_enabled:
+        raise HTTPException(422,'Choose an employee or team manager')
+    if team.leader_id == employee.id:
+        return {'ok':True}
+    if team.leader_id != data.previous_leader_id:
+        raise HTTPException(409,'The team manager changed. Review the current assignment.')
+    if not db.get(Membership,(employee.id,team.id)):
+        db.add(Membership(user_id=employee.id,team_id=team.id,maintainer=False))
+    previous = team.leader_id
+    employee.role = 'M'
+    team.leader_id = employee.id
+    audit(db,'team_manager_assigned',team.id,actor=u,detail={'employee':employee.id,'previous_manager':previous})
+    db.commit()
+    return {'ok':True}
+
+
+class NewEmployee(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra='forbid')
+    name: str = Field(min_length=1, max_length=100)
+    email: str = Field(max_length=255, pattern=r'^[^@\s]+@[^@\s]+$')
+    phone: str = Field(default='', max_length=50)
+
+@app.post('/api/admin/users', status_code=201)
+def create_employee(data:NewEmployee,u:User=Depends(current_user),db:Session=Depends(db_session)):
+    require_role(u,'A')
+    employee = User(name=data.name,email=data.email,phone=data.phone,role='E')
+    db.add(employee)
+    try:
+        db.flush()
+        audit(db,'employee_created',actor=u,detail={'employee':employee.id})
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409,'An employee with this name already exists')
+    return row(employee,['id','name','email','phone','role'])
 
 @app.post('/api/admin/sources')
 def admin_source(data:dict=Body(...),u:User=Depends(current_user),db:Session=Depends(db_session)):

@@ -45,3 +45,10 @@
     align-items: start;
   }
 }
+
+.channel-panel { border: 1px solid var(--line); border-radius: 8px; padding: .65rem; }
+.channel-panel legend { font-weight: 600; padding: 0 .3rem; }
+.channel-panel button { padding: .55rem .75rem; margin: .2rem; border: 1px solid var(--line); border-radius: 6px; background: white; color: var(--navy); }
+.channel-panel button[aria-pressed="true"] { background: var(--navy); color: white; }
+.channel-panel button[aria-pressed="true"]::before { content: "✓ "; }
+.channel-panel button:disabled { opacity: 1; cursor: default; }

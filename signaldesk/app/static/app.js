@@ -59,8 +59,16 @@ function setupIdentity(){
   else document.querySelectorAll('.nav-link').forEach(el=>{if(el.dataset.view==='admin'||el.dataset.view==='debug')el.hidden=true});
 }
 async function chooseTeam(value,refresh=true){
+  deliveryPage = 1;
+  deliveryRequest++;
   const teams=allTeams();if(value===null||value===undefined)value=teams[0]?.id||null;
-  state.team=value?Number(value):null;
+  const next=value?Number(value):null;
+  if(next!==state.team){
+    state.ruleId=null;state.runbookId=null;
+    $('rule-json').value='';$('rule-editor-title').textContent='Rule editor';
+    $('runbook-name').value='';$('runbook-text').value='';$('runbook-canonical').textContent='';$('runbook-editor-title').textContent='Runbook editor';
+  }
+  state.team=next;
   let opts=teams.map(t=>[t.id,t.name+((state.me.shared_teams||[]).some(s=>s.id===t.id)?' (read-only)':'')]);
   $('team-selector').innerHTML=selectHtml(opts,state.team);$('filter-team').innerHTML='<option value="">All my teams</option>'+selectHtml(opts,state.team);
   $('filter-team').value=state.team||'';
@@ -85,18 +93,18 @@ function connectSSE(){
 }
 function scheduleRefresh(){clearTimeout(state.refreshTimer);state.refreshTimer=setTimeout(()=>refreshView(true),650)}
 async function refreshView(quiet=false){
-  if(state.loading)return;state.loading=true;
+  if(state.loading){if(!quiet)state.pendingRefresh=true;return}state.loading=true;
   try{
     switch(state.view){
       case 'board':await renderBoard();break;case 'activity':await renderActivity();break;case 'tickets':await renderTickets();break;
       case 'archive':await renderArchive();break;case 'unmatched':await renderUnmatched();break;case 'rules':await renderRules();break;
       case 'runbooks':await renderRunbooks();break;case 'proposals':await renderProposals();break;case 'delivery':await renderDelivery(quiet);break;
-      case 'organization':await renderOrganization();break;case 'access':await renderAccess();break;case 'settings':await renderSettings();break;
+      case 'organization':await renderOrganization();break;case 'settings':await renderSettings();break;
       case 'admin':await renderAdmin();break;case 'debug':await renderDebug();break;
     }
     if(state.ticket)await openTicket(state.ticket,true);
   }catch(err){if(!quiet)toast(err.message,true)}
-  finally{state.loading=false}
+  finally{state.loading=false;if(state.pendingRefresh){state.pendingRefresh=false;await refreshView()}}
 }
 function ticketCard(t){
   const display=t.display_id||'TKT-'+t.id;
@@ -139,20 +147,26 @@ function ticketTable(items){
 }
 async function renderTickets(){const [active,handled]=await Promise.all([api('/tickets'),api('/tickets?handled=true')]);$('tickets-list').innerHTML=ticketTable(active);$('handled-list').innerHTML=ticketTable(handled)}
 async function renderArchive(){
-  let team=state.team;let managerTeams=myTeams().filter(t=>t.leader_id===state.me.id).map(t=>t.id);if(!managerTeams.includes(team))team=managerTeams[0];
+  const team=state.team;
   let qs=new URLSearchParams({include_errors:$('filter-include-errors').checked?'true':'false',search:$('archive-search').value});if(team)qs.set('team',team);
   $('history-list').innerHTML=ticketTable(await api('/archive?'+qs));
 }
 async function renderUnmatched(){
   const items=await api('/unmatched');
-  $('unmatched-list').innerHTML=items.length?items.map(x=>`<article class="panel"><div class="stack-item-head"><h3>Event #${x.id} · No matching rule</h3><span class="soft-pill">UNMATCHED</span></div><p class="field-hint">Received ${e(fmtTime(x.received_at))}; traversed ${(x.route_trace||[]).length} team rulebooks.</p><details><summary>Raw event and full routing trace</summary><pre class="drawer-json">${e(x.raw)}</pre><pre class="drawer-json">${e(safeJson(x.route_trace))}</pre></details></article>`).join(''):'<div class="panel empty-state">All processed events matched. An unknown schema without a rule appears here, never silently discarded.</div>';
+  function claimButtons(event){
+    if(state.me.role!=='M')return '';
+    const attempted=new Set(event.route_trace.map(entry=>entry.team_id));
+    return myTeams().filter(team=>team.leader_id===state.me.id && attempted.has(team.id))
+      .map(team=>`<button class="btn btn-subtle" data-action="claim-event" data-id="${event.id}" data-team="${team.id}">Take for ${e(team.name)}</button>`).join('');
+  }
+  $('unmatched-list').innerHTML=items.length?items.map(x=>`<article class="panel"><div class="stack-item-head"><h3>Event #${x.id} · No matching rule</h3><span class="soft-pill">UNMATCHED</span></div><p class="field-hint">Received ${e(fmtTime(x.received_at))}; traversed ${(x.route_trace||[]).length} team rulebooks.</p><details><summary>Raw event and full routing trace</summary><pre class="drawer-json">${e(x.raw)}</pre><pre class="drawer-json">${e(safeJson(x.route_trace))}</pre></details><div class="form-actions">${claimButtons(x)}</div></article>`).join(''):'<div class="panel empty-state">All processed events matched. An unknown schema without a rule appears here, never silently discarded.</div>';
 }
 const sampleRule={name:'New routing rule',description:'Describe when this rule should fire',priority:50,enabled:true,condition:{all:[{field:'canonical.severity',op:'in',value:['error','critical']},{field:'canonical.service',op:'eq',value:'risk-engine'}]},presentation:{title:'Alert · {{canonical.service}}',body:'{{error.message}}'},routing:{recipients:'team',mandatory_channels:[]},dedup_template:'{{canonical.service}}:{{canonical.schema}}',group_template:'',throttle_seconds:0,runbook_id:null};
 async function renderRules(){
   if(!state.team){$('rules-list').innerHTML='<p class="empty-state">Select a team first.</p>';return}
   const items=await api('/rules?team='+state.team);state.rules=items;
   $('rules-count').textContent=items.length+' rules';
-  $('rules-list').innerHTML=items.length?items.map(r=>`<div class="stack-item"><div class="stack-item-head"><h3>${e(r.name)}</h3><span class="soft-pill">${r.enabled?'Enabled':'Disabled'}</span></div><p>Priority ${r.priority} · v${r.version} · ${e(r.description||'First matching rule wins')}</p><div class="stack-item-actions"><button class="micro-btn" data-action="edit-rule" data-id="${r.id}">Inspect / edit</button>${isManager()?`<button class="micro-btn" data-action="disable-rule" data-id="${r.id}">Disable</button>`:''}</div></div>`).join(''):'<p class="empty-state">No matching rules yet. The manager can create the first one.</p>';
+  $('rules-list').innerHTML=items.length?items.map(r=>`<div class="stack-item"><div class="stack-item-head"><h3>${e(r.name)}</h3><span class="soft-pill">${r.enabled?'Enabled':'Disabled'}</span></div><p>Priority ${r.priority} · v${r.version} · ${e(r.description||'First matching rule wins')}</p><div class="stack-item-actions"><button class="micro-btn" data-action="edit-rule" data-id="${r.id}">Inspect / edit</button>${isManager()?`<button class="micro-btn" data-action="disable-rule" data-id="${r.id}" ${r.enabled?'':'disabled'}>Disable</button><button class="micro-btn" data-action="delete-rule" data-id="${r.id}">Delete</button>`:''}</div></div>`).join(''):'<p class="empty-state">No matching rules yet. The manager can create the first one.</p>';
   if(!state.ruleId || !items.some(r=>r.id===state.ruleId)){
     if(!$('rule-json').value)$('rule-json').value=safeJson(sampleRule);
   }else if(document.activeElement!==$('rule-json'))$('rule-json').value=safeJson(items.find(r=>r.id===state.ruleId));
@@ -166,66 +180,125 @@ async function renderRunbooks(){
 }
 async function renderProposals(){
   const items=await api('/proposals');
-  $('proposals-list').innerHTML=items.length?items.map(p=>`<article class="panel"><div class="stack-item-head"><div><h3>CHANGE #${p.id} · ${e(p.target_type)} ${p.target_id?'#'+p.target_id:'(new)'}</h3><p class="field-hint">${e(teamName(p.team_id))} · requested by ${e(findName(p.requester_id))} · ${e(fmtTime(p.created_at))}</p></div><span class="soft-pill">${e(p.status.toUpperCase())}</span></div><p class="drawer-note">${e(p.description)}</p>${p.comment?`<p class="drawer-note"><strong>Manager decision:</strong> ${e(p.comment)}</p>`:''}${p.revised_from?`<p class="field-hint">Revision of request #${p.revised_from}</p>`:''}${isManager()&&p.status==='open'?`<div class="form-actions"><button class="btn btn-subtle" data-action="proposal-decision" data-id="${p.id}" data-decision="accepted">Accept</button><button class="btn btn-danger" data-action="proposal-decision" data-id="${p.id}" data-decision="rejected">Reject</button><button class="btn btn-primary" data-action="proposal-decision" data-id="${p.id}" data-decision="implemented">Implemented</button></div>`:''}</article>`).join(''):'<div class="panel empty-state">No change requests yet. Submit an enhancement proposal for your team manager.</div>';
+  $('proposals-list').innerHTML=items.length?items.map(p=>`<article class="panel"><div class="stack-item-head"><div><h3>CHANGE #${p.id} · ${e(p.target_type)} ${p.target_id?'#'+p.target_id:'(new)'}</h3><p class="field-hint">${e(teamName(p.team_id))} · requested by ${e(findName(p.requester_id))} · ${e(fmtTime(p.created_at))}</p></div><span class="soft-pill">${e(p.status.toUpperCase())}</span></div><p class="drawer-note">${e(p.description)}</p>${p.comment?`<p class="drawer-note"><strong>Manager decision:</strong> ${e(p.comment)}</p>`:''}${p.revised_from?`<p class="field-hint">Revision of request #${p.revised_from}</p>`:''}${myTeams().some(t=>t.id===p.team_id&&t.leader_id===state.me.id)&&p.status==='open'?`<div class="form-actions"><button class="btn btn-subtle" data-action="proposal-decision" data-id="${p.id}" data-decision="accepted">Accept</button><button class="btn btn-danger" data-action="proposal-decision" data-id="${p.id}" data-decision="rejected">Reject</button><button class="btn btn-primary" data-action="proposal-decision" data-id="${p.id}" data-decision="implemented">Implemented</button></div>`:''}</article>`).join(''):'<div class="panel empty-state">No change requests yet. Submit an enhancement proposal for your team manager.</div>';
 }
-function selectedPreferredChannels(){
-  return Array.from($('preferred-channel-options').querySelectorAll('input:checked'), input => input.value);
+for (const [id, offset] of [['delivery-prev',-1],['delivery-next',1]]) {
+  $(id).addEventListener('click', () => renderDeliveryLog(deliveryPage+offset).catch(err => toast(err.message,true)));
 }
-function showPreferredChannels(selected){
-  const primary = $('primary-channel');
-  const reserved = [primary.value, $('backup-channel').value];
-  const choices = Array.from(primary.options).filter(option => !reserved.includes(option.value));
-  $('preferred-channel-options').replaceChildren(...choices.map(option => {
-    const label = document.createElement('label');
-    label.className = 'check-label';
-    const input = document.createElement('input');
-    input.type = 'checkbox';
-    input.value = option.value;
-    input.checked = selected.includes(option.value);
-    label.append(input, option.textContent);
-    return label;
-  }));
+
+function selectedTicketChannels(){
+  return Object.fromEntries(Array.from($('ticket-channel-options').children, group => [
+    group.dataset.category, Array.from(group.querySelectorAll('[data-personal="true"]'), button => button.value)
+  ]));
 }
-for (const id of ['primary-channel', 'backup-channel']) {
-  $(id).addEventListener('change', () => showPreferredChannels(selectedPreferredChannels()));
+
+function renderTicketChannels(profile, policies, personal){
+  const member = getTeam()?.members.find(person => person.id === profile.id);
+  const applicable = policies.filter(p => (p.kind === 'new_ticket' || p.kind === 'all') &&
+    ((p.target === 'all' && member) || (p.target === 'maintainers' && member?.maintainer) || p.target === 'user:'+profile.id));
+  const groups = Object.entries(profile.ticket_categories).map(([category, label]) => {
+    const group = document.createElement('fieldset');
+    group.className = 'channel-panel';
+    group.dataset.category = category;
+    const legend = document.createElement('legend');
+    legend.textContent = label;
+    group.append(legend);
+    const required = new Set(applicable.filter(p => p.severity === category || p.severity === 'all').map(p => p.channel));
+    const choices = new Set(personal[category]);
+    function update(){
+      for (const button of group.querySelectorAll('button')){
+        const forced = required.has(button.value);
+        button.dataset.personal = choices.has(button.value);
+        button.setAttribute('aria-pressed', forced || choices.has(button.value));
+        button.disabled = forced || (choices.size === 1 && choices.has(button.value));
+      }
+    }
+    for (const [channel,name] of Object.entries(profile.policy_channels)){
+      if (!(channel in profile.available_channels) && !required.has(channel)) continue;
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.value = channel;
+      button.textContent = required.has(channel) ? name + ' · Required' : name;
+      button.addEventListener('click', () => {
+        if (choices.has(channel)) choices.delete(channel);
+        else choices.add(channel);
+        update();
+      });
+      group.append(button);
+    }
+    update();
+    return group;
+  });
+  $('ticket-channel-options').replaceChildren(...groups);
 }
 
 async function renderDelivery(quiet=false){
   const m=state.me;
-  if (!quiet) {
-    $('primary-channel').value=m.primary_channel;$('backup-channel').value=m.backup_channel;
-    showPreferredChannels(m.preferred_channels || []);
-    $('schedule-start').value=m.schedule?.start||'00:00';$('schedule-end').value=m.schedule?.end||'23:59';$('schedule-timezone').value=m.schedule?.timezone||'UTC';$('buffer-seconds').value=m.buffer_seconds||0;
+  const team=state.team;
+  const pol=team?await api('/policies?team='+team):[];
+  if(team!==state.team||m.id!==state.me?.id)return;
+  const panel=$('ticket-channel-options');
+  const signature=JSON.stringify([team,m.id,pol]);
+  if(!quiet || panel.dataset.policySignature!==signature){
+    const personal=quiet && panel.dataset.owner===String(m.id) ? selectedTicketChannels() : m.ticket_channels;
+    renderTicketChannels(m,pol,personal);
+    panel.dataset.owner=m.id;
+    panel.dataset.policySignature=signature;
   }
-  const pol=state.team?await api('/policies?team='+state.team):[];
-  $('delivery-forced-policies').innerHTML=pol.length?pol.map(p=>`<div class="stack-item"><h3>${e(pretty(p.severity))} · ${e(pretty(p.channel))}</h3><p>Applies to ${e(p.target)} · ${e(pretty(p.kind))}. Team manager policy.</p></div>`).join(''):'<p class="empty-state">No additional manager-enforced channels for this team.</p>';
-  const logs=await api('/delivery');
+  if (!quiet) {
+    $('force-channel').replaceChildren(...Object.entries(m.policy_channels).map(([key,label]) => new Option(label,key)));
+    $('force-severity').replaceChildren(...Object.entries({...m.ticket_categories,all:'All ticket types'}).map(([key,label]) => new Option(label,key)));
+  }
+  $('delivery-forced-policies').innerHTML=pol.length?pol.map(p=>`<div class="stack-item"><h3>${e(pretty(p.severity))} · ${e(pretty(p.channel))}</h3><p>Applies to ${e(p.target)} · ${e(pretty(p.kind))}. Team manager policy.</p>${isManager() ? (pol.length > 1 ? `<button class="btn btn-subtle" data-action="delete-policy" data-id="${p.id}">Remove policy</button>` : '<span class="field-hint">At least one mandatory policy is required.</span>') : ''}</div>`).join(''):'<p class="empty-state">No additional manager-enforced channels for this team.</p>';
+  await renderDeliveryLog(deliveryPage);
+}
+
+let deliveryPage = 1;
+let deliveryRequest = 0;
+async function renderDeliveryLog(page){
+  const request = ++deliveryRequest;
+  const user = state.me?.id;
+  const result = await api('/delivery?page='+page);
+  if(request!==deliveryRequest || state.me?.id!==user)return;
+  deliveryPage = result.page;
+  $('delivery-pages').hidden = result.pages <= 1;
+  $('delivery-prev').disabled = result.page === 1;
+  $('delivery-next').disabled = result.page === result.pages;
+  $('delivery-page-label').textContent = 'Page '+result.page+' of '+result.pages;
+  const logs = result.items;
   $('delivery-log').innerHTML=logs.length?`<table class="data-table"><thead><tr><th>Ticket</th><th>Channel</th><th>Kind</th><th>Status</th><th>Attempts</th><th>Next / sent</th></tr></thead><tbody>${logs.map(d=>`<tr><td>#${e(d.ticket_id||'—')}</td><td>${e(pretty(d.channel))}</td><td>${e(pretty(d.kind))}</td><td><span class="soft-pill">${e(d.status)}</span></td><td>${e(d.attempts)}</td><td>${e(fmtTime(d.sent_at||d.available_at))}</td></tr>`).join('')}</tbody></table>`:'<p class="empty-state">Deliveries appear here when a rule creates an alert.</p>';
 }
 async function renderOrganization(){
   const data=await api('/organization');
   const card=p=>p?`<div class="stack-item"><div class="stack-item-head"><h3>${e(p.name)}</h3><span class="soft-pill">${e(p.role)}</span></div><p>${e(p.email)}</p><p>${e(p.direct_reports)} direct reports</p></div>`:'<p class="empty-state">No direct manager in the organization tree.</p>';
+  $('org-team-rosters').innerHTML=data.managed_teams.map(team=>{
+    const ids = new Set(team.members.map(member=>member.id));
+    const candidates = data.employees.filter(person=>!ids.has(person.id));
+    const members = team.members.map(member=>`<li class="stack-item"><div class="stack-item-head"><span>${e(member.name)}</span>${member.id===team.leader_id?'Team manager':`<button class="btn btn-subtle" data-action="remove-team-member" data-team="${team.id}" data-id="${member.id}" aria-label="Remove ${e(member.name)} from ${e(team.name)}">Remove</button>`}</div></li>`).join('');
+    const add = candidates.length ? `<div class="form-actions"><label for="org-add-${team.id}">Employee</label><select id="org-add-${team.id}">${selectHtml(candidates.map(person=>[person.id,person.name]),null)}</select><button class="btn btn-primary" data-action="add-team-member" data-team="${team.id}">Add to team</button></div>` : '';
+    return `<section class="panel panel-gap"><h2>${e(team.name)}</h2><ul class="stack-list">${members}</ul>${add}</section>`;
+  }).join('');
   $('org-manager-card').innerHTML=card(data.manager);
   $('org-reports-list').innerHTML=data.reports.length?data.reports.map(card).join(''):'<p class="empty-state">No direct reports.</p>';
-}
-async function renderAccess(){
-  const opts=allTeams().map(t=>t.id);const others=(await api('/teams').catch(()=>[]));
-  // Board-request targets are deliberately the other seeded teams; no hierarchy exposed.
-  const potential=[['1','Payments & Reliability'],['2','Settlement Operations'],['3','Rates Trading'],['4','Pricing Infrastructure']].filter(([id])=>!opts.includes(Number(id)));
-  $('access-team').innerHTML=selectHtml(potential,null);
-  const items=await api('/access');
-  $('access-requests-pending').innerHTML=items.length?items.map(a=>`<div class="stack-item"><div class="stack-item-head"><h3>Team #${a.team_id} · ${e(a.status)}</h3><span class="soft-pill">${a.user_id===state.me.id?'My request':'From '+e(findName(a.user_id))}</span></div><p>${e(a.reason||'No reason provided')}</p>${a.status==='pending'&&allTeams().find(t=>t.id===a.team_id)?.leader_id===state.me.id?`<div class="form-actions"><button class="micro-btn" data-action="access-decision" data-id="${a.id}" data-decision="1">Approve</button><button class="micro-btn" data-action="access-decision" data-id="${a.id}" data-decision="0">Deny</button></div>`:''}</div>`).join(''):'<p class="empty-state">No access requests.</p>';
-  $('access-request-form').hidden=potential.length===0;
 }
 async function renderSettings(){
   const m=state.me;
   $('settings-preset').value=m.preset||'engineer';$('settings-timezone').value=m.timezone||'Europe/Warsaw';
   $('preset-indicator').textContent='Current preset: '+pretty(m.preset||'engineer')+'. This never alters authorization.';
-  $('profile-card').innerHTML=`<div class="panel-head"><h2>Employee profile</h2><span class="soft-pill">${e(m.role)}${m.debug_enabled?' + D':''}</span></div><div class="stack-item"><div class="stack-item-head"><div class="user-avatar">${e(initials(m.name))}</div><h3>${e(m.name)}</h3></div><p>${e(m.email)}</p><p>${e(m.phone||'No phone')}</p></div><div class="data-kv panel-nested"><div><span>PRIMARY CHANNEL</span><strong>${e(pretty(m.primary_channel))}</strong></div><div><span>BACKUP CHANNEL</span><strong>${e(pretty(m.backup_channel))}</strong></div><div><span>TEAM MEMBERSHIP</span><strong>${myTeams().length} teams</strong></div><div><span>UI PRESET</span><strong>${e(pretty(m.preset))}</strong></div></div>`;
+  $('profile-card').innerHTML=`<div class="panel-head"><h2>Employee profile</h2><span class="soft-pill">${e(m.role)}${m.debug_enabled?' + D':''}</span></div><div class="stack-item"><div class="stack-item-head"><div class="user-avatar">${e(initials(m.name))}</div><h3>${e(m.name)}</h3></div><p>${e(m.email)}</p><p>${e(m.phone||'No phone')}</p></div><div class="data-kv panel-nested"><div><span>DELIVERY CHANNELS</span><strong>${e([...new Set(Object.values(m.ticket_channels).flat())].map(c=>m.available_channels[c]).join(', '))}</strong></div><div><span>TEAM MEMBERSHIP</span><strong>${myTeams().length} teams</strong></div><div><span>UI PRESET</span><strong>${e(pretty(m.preset))}</strong></div></div>`;
 }
 async function renderAdmin(){
   const data=await api('/admin');
   $('admin-metrics').innerHTML=Object.entries(data.metrics).slice(0,4).map(([name,val])=>`<article class="metric"><span class="metric-label">${e(pretty(name).toUpperCase())}</span><div class="metric-main"><strong>${val}</strong><span class="metric-symbol">⌁</span></div><span class="metric-caption">Persisted platform data</span></article>`).join('');
+  $('admin-teams').innerHTML=data.teams.map(team=>{
+    const members=new Set(team.members.map(member=>member.id));
+    const choices=people=>selectHtml(people.map(person=>[person.id,person.name]),null);
+    const available=data.staff.filter(person=>!members.has(person.id));
+    const successors=data.staff.filter(person=>person.id!==team.leader_id);
+    const add=available.length?`<div class="form-actions"><label for="admin-member-${team.id}">Employee</label><select id="admin-member-${team.id}">${choices(available)}</select><button class="btn btn-subtle" data-action="admin-add-member" data-team="${team.id}">Add to team</button></div>`:'';
+    const promote=successors.length?`<div class="form-actions"><label for="admin-manager-${team.id}">New manager</label><select id="admin-manager-${team.id}">${choices(successors)}</select><button class="btn btn-primary" data-action="assign-manager" data-team="${team.id}" data-leader="${team.leader_id}">Assign manager</button></div>`:'';
+    return `<article class="stack-item" data-name="${e(team.name)}"><h3>${e(team.name)}</h3><p>Manager: ${e(team.leader_name)}</p><p>Members: ${team.members.map(member=>e(member.name)).join(', ')}</p>${add}${promote}</article>`;
+  }).join('');
   $('admin-sources').innerHTML=`<table class="data-table"><thead><tr><th>Source</th><th>Adapter</th><th>Routing chain</th><th>State</th></tr></thead><tbody>${data.sources.map(s=>`<tr><td>${e(s.name)}<br><small>${e(s.slug)}</small></td><td>${e(s.type)}</td><td>${s.routing_chain?.map(id=>e(data.teams.find(t=>t.id===id)?.name||String(id))).join(' → ')||'All teams'}</td><td>${s.enabled?'Enabled':'Disabled'}</td></tr>`).join('')}</tbody></table>`;
 }
 async function renderDebug(){
@@ -268,22 +341,41 @@ async function openTicket(id,quiet=false){
 function closeTicket(){state.ticket=null;$('drawer-backdrop').hidden=true;$('ticket-detail').hidden=true;$('ticket-detail').setAttribute('aria-hidden','true')}
 function dialog(title,fields,confirmText='Confirm'){
   return new Promise(resolve=>{
-    const d=$('app-dialog');$('dialog-title').textContent=title;$('dialog-body').innerHTML=`<div class="dialog-fields">${fields}</div>`;$('dialog-confirm').textContent=confirmText;
+    const d=$('app-dialog');d.returnValue='';$('dialog-title').textContent=title;$('dialog-body').innerHTML=`<div class="dialog-fields">${fields}</div>`;$('dialog-confirm').textContent=confirmText;
     const onclose=()=>{d.removeEventListener('close',onclose);resolve(d.returnValue==='confirm'?new FormData(d.querySelector('form')):null)};
     d.addEventListener('close',onclose);d.showModal();
   });
 }
 async function confirmDialog(title,message){return !!(await dialog(title,`<p class="drawer-note">${e(message)}</p>`))}
+function creationTeamField(){
+  if(state.team)return '';
+  return `<label>Team<select name="team_id" required>${selectHtml(myTeams().map(t=>[t.id,t.name]),null)}</select></label>`;
+}
 async function userAction(el){
   const action=el.dataset.action;const id=Number(el.dataset.id);
   try{
     if(action==='login'){await api('/session','POST',{user_id:id});await initialize();return}
     if(action==='logout'){if(await confirmDialog('Switch persona','Sign out of this demo identity?')){await api('/logout','POST');state.stream?.close();state.me=null;showPersonaLogin()}return}
     if(action==='close-ticket'){closeTicket();return}
+    if(action==='claim-event'){
+      const team=Number(el.dataset.team);
+      const options=selectHtml(Object.entries(state.me.ticket_categories),'');
+      const form=await dialog('Take event #'+id+' for '+teamName(team),
+        `<label>Ticket type<select name="category" required><option value="">Choose a ticket type</option>${options}</select></label>`, 'Create ticket');
+      if(!form)return;
+      try{
+        const ticket=await api('/unmatched/'+id+'/claim','POST',{team_id:team,category:form.get('category')});
+        $('board-filters').reset();
+        await chooseTeam(team,false);
+        navigate('board');
+        toast('Created '+ticket.display_id+' on '+teamName(team)+' and assigned it to you');
+      }catch(err){await renderUnmatched();throw err}
+      return;
+    }
     if(action==='open-ticket'){await openTicket(id);return}
     if(action==='new-task'){
-      const f=await dialog('Create a new task',`<label>Title <input name="title" required placeholder="What needs to be done?"></label><label>Description <textarea name="body" placeholder="Purpose and next steps"></textarea></label>`,'Create task');
-      if(f){await api('/tickets','POST',{title:f.get('title'),body:f.get('body'),team_id:state.team});toast('Task created');await refreshView()}return;
+      const f=await dialog('Create a new task',creationTeamField()+`<label>Title <input name="title" required placeholder="What needs to be done?"></label><label>Description <textarea name="body" placeholder="Purpose and next steps"></textarea></label>`,'Create task');
+      if(f){await api('/tickets','POST',{title:f.get('title'),body:f.get('body'),team_id:Number(f.get('team_id')||state.team)});toast('Task created');await refreshView()}return;
     }
     if(action==='join-ticket'){await api('/tickets/'+id+'/join','POST');toast('Joined ticket');await refreshView();return}
     if(action==='add-member'){
@@ -318,6 +410,13 @@ async function userAction(el){
     if(action==='new-rule'){state.ruleId=null;$('rule-editor-title').textContent='New routing rule';$('rule-json').value=safeJson(sampleRule);return}
     if(action==='edit-rule'){const rule=state.rules?.find(r=>r.id===id);if(rule){state.ruleId=id;$('rule-editor-title').textContent='Edit · '+rule.name;$('rule-json').value=safeJson(rule)}return}
     if(action==='save-rule'){const rule=readRuleEditor();if(state.ruleId)await api('/rules/'+state.ruleId,'PUT',rule);else await api('/rules','POST',rule);toast('Rule published; next event uses new version');await renderRules();return}
+    if(action==='delete-rule'){
+      const rule=state.rules.find(item=>item.id===id);
+      if(!rule||!await confirmDialog('Delete routing rule?', 'Permanently remove '+rule.name+' from '+teamName(rule.team_id)+'?'))return;
+      await api('/rules/'+id+'?permanent=true','DELETE');
+      if(state.ruleId===id){state.ruleId=null;$('rule-json').value='';$('rule-editor-title').textContent='Rule editor'}
+      await renderRules();toast('Rule deleted');return;
+    }
     if(action==='disable-rule'){if(await confirmDialog('Disable rule','The rule will no longer match new events; historic tickets remain intact.')){await api('/rules/'+id,'DELETE');await renderRules()}return}
     if(action==='test-rule'){const result=await api('/rules/test','POST',{team_id:state.team,rule:readRuleEditor(),event:JSON.parse($('rule-sample').value)});$('rule-test-result').textContent=`Matched: ${result.matched?'YES':'NO'}\nSeverity: ${result.severity}\nTitle: ${result.title}\nBody: ${result.body}`;return}
     if(action==='request-rule'||action==='request-runbook'){const desc=await dialog('Request a manager review','<label>Describe the requested change<textarea name="description" required placeholder="What needs to change, and why?"></textarea></label>','Submit request');if(desc){await api('/proposals','POST',{team_id:state.team,target_type:action==='request-rule'?'rule':'runbook',target_id:action==='request-rule'?state.ruleId:state.runbookId,description:desc.get('description')});toast('Change request sent to team manager')}return}
@@ -325,21 +424,66 @@ async function userAction(el){
     if(action==='edit-runbook'){const rb=state.runbooks?.find(r=>r.id===id);if(rb){state.runbookId=id;$('runbook-name').value=rb.name;$('runbook-text').value=rb.source_text;$('runbook-format').value=rb.source_format;$('runbook-editor-title').textContent=rb.name;$('runbook-canonical').textContent='Parsed steps: '+rb.steps.map(s=>s.text).join(' • ')}return}
     if(action==='save-runbook'){const data={team_id:state.team,name:$('runbook-name').value,source_format:$('runbook-format').value,source_text:$('runbook-text').value};if(state.runbookId)await api('/runbooks/'+state.runbookId,'PUT',data);else await api('/runbooks','POST',data);toast('Runbook published');await renderRunbooks();return}
     if(action==='new-proposal'){
-      const f=await dialog('Request a change',`<label>Target type <select name="target_type"><option value="rule">Routing rule</option><option value="runbook">Runbook</option></select></label><label>Target ID (optional)<input type="number" name="target_id" placeholder="Leave blank for new item"></label><label>Requested change<textarea name="description" required></textarea></label>`,'Submit request');
-      if(f){await api('/proposals','POST',{team_id:state.team,target_type:f.get('target_type'),target_id:f.get('target_id')?Number(f.get('target_id')):null,description:f.get('description')});toast('Manager review requested');await renderProposals()}return;
+      const f=await dialog('Request a change',creationTeamField()+`<label>Target type <select name="target_type"><option value="rule">Routing rule</option><option value="runbook">Runbook</option></select></label><label>Target ID (optional)<input type="number" name="target_id" placeholder="Leave blank for new item"></label><label>Requested change<textarea name="description" required></textarea></label>`,'Submit request');
+      if(f){await api('/proposals','POST',{team_id:Number(f.get('team_id')||state.team),target_type:f.get('target_type'),target_id:f.get('target_id')?Number(f.get('target_id')):null,description:f.get('description')});toast('Manager review requested');await renderProposals()}return;
     }
     if(action==='proposal-decision'){
       const decision=el.dataset.decision;let comment='';if(decision==='rejected'){let f=await dialog('Reject change request','<label>Reason for rejection<textarea required name="comment"></textarea></label>','Reject');if(!f)return;comment=f.get('comment')}
       await api('/proposals/'+id+'/decision','POST',{decision,comment});toast('Change request '+decision);await renderProposals();return;
     }
     if(action==='save-preferences'){
-      await api('/preferences','PUT',{primary_channel:$('primary-channel').value,backup_channel:$('backup-channel').value,preferred_channels:selectedPreferredChannels(),buffer_seconds:Number($('buffer-seconds').value),schedule:{timezone:$('schedule-timezone').value,start:$('schedule-start').value,end:$('schedule-end').value}});
+      await api('/preferences','PUT',{ticket_channels:selectedTicketChannels()});
       state.me=await api('/me');toast('Delivery preferences updated');return;
     }
-    if(action==='force-policy'){await api('/policies','POST',{team_id:state.team,severity:$('force-severity').value,channel:$('force-channel').value});toast('Mandatory team channel added');await renderDelivery();return}
+    if(action==='delete-policy'){
+      if(!await confirmDialog('Remove mandatory policy?', 'Remove '+el.closest('.stack-item').querySelector('h3').textContent+' from '+teamName(state.team)+'?'))return;
+      await api('/policies/'+id,'DELETE');
+      toast('Mandatory policy removed');
+      await renderDelivery(true);
+      return;
+    }
+    if(action==='force-policy'){await api('/policies','POST',{team_id:state.team,severity:$('force-severity').value,channel:$('force-channel').value});toast('Mandatory team channel added');await renderDelivery(true);return}
     if(action==='save-settings'){await api('/preferences','PUT',{preset:$('settings-preset').value,timezone:$('settings-timezone').value});state.me=await api('/me');$('app-shell').dataset.preset=state.me.preset;toast('Settings saved');await renderSettings();return}
-    if(action==='request-access'){await api('/access','POST',{team_id:Number($('access-team').value),reason:$('access-reason').value});toast('Access request sent');await renderAccess();return}
-    if(action==='access-decision'){await api('/access/'+id+'/decision','POST',{approved:el.dataset.decision==='1'});toast('Board access decision recorded');await renderAccess();return}
+    if(action==='admin-add-member'||action==='assign-manager'){
+      const team=Number(el.dataset.team);
+      if(action==='admin-add-member'){
+        await api('/teams/'+team+'/members','POST',{action:'add',user_id:Number($('admin-member-'+team).value)});
+        toast('Employee added to team');
+      }else{
+        const picker=$('admin-manager-'+team);
+        const name=picker.selectedOptions[0].textContent;
+        const teamName=el.closest('article').dataset.name;
+        if(!await confirmDialog('Assign team manager?',name+' will replace the current manager of '+teamName+'.'))return;
+        await api('/admin/teams/'+team+'/manager','PUT',{user_id:Number(picker.value),previous_leader_id:Number(el.dataset.leader)});
+        toast('Team manager assigned');
+      }
+      await renderAdmin();return;
+    }
+    if(action==='create-employee'){
+      const fields = '<label>Full name<input name="name" maxlength="100" required></label><label>Email<input name="email" type="email" maxlength="255" required></label><label>Phone (optional)<input name="phone" type="tel" maxlength="50"></label>';
+      const form = await dialog('Create employee',fields,'Create employee');
+      if(form){
+        const employee = await api('/admin/users','POST',Object.fromEntries(form));
+        toast('Created employee: '+employee.name);
+        await renderAdmin();
+      }
+      return;
+    }
+    if(action==='add-team-member'||action==='remove-team-member'){
+      const team=Number(el.dataset.team);
+      const add=action==='add-team-member';
+      const user=add?Number($('org-add-'+team).value):id;
+      if(!add){
+        const roster=state.me.teams.find(item=>item.id===team);
+        const employee=roster.members.find(member=>member.id===user);
+        if(!await confirmDialog('Remove employee from team?', 'Remove '+employee.name+' from '+roster.name+'?'))return;
+      }
+      await api('/teams/'+team+'/members','POST',{user_id:user,action:add?'add':'remove'});
+      state.me=await api('/me');
+      await renderOrganization();
+      toast(add?'Employee added to team':'Employee removed from team');
+      return;
+    }
     if(action==='create-source'){let data=JSON.parse($('source-config').value);await api('/admin/sources','POST',data);toast('Source registered');await renderAdmin();return}
     if(action==='toggle-channel'){await api('/debug/channel','POST',{name:el.dataset.name,failing:el.dataset.failing==='true'});toast('Test channel state changed');await renderDebug();return}
     if(action==='generate'){const value=JSON.parse($('debug-payload').value);const n=Number($('debug-count').value);const result=await api('/debug/generate','POST',{event:value,count:n});toast(`Queued ${result.accepted} test events in the real ingestion pipeline`);await renderDebug();return}

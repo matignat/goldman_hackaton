@@ -1,3 +1,4 @@
+import pytest
 import json,copy
 from app.database import Session
 from app.models import Ticket,Event,Delivery,Rule,Audit,ChannelState,User
@@ -8,23 +9,21 @@ from app.services.delivery import process_deliveries,RETRY_SECONDS
 from app.services.conditions import matches,canonical,validate
 
 
-def test_additional_channels_are_optional_and_deliver_once(login):
+def test_delivery_preferences_require_routes_for_every_type(login):
     client = login(2)
-    assert client.get('/api/me').json()['preferred_channels'] == []
-    settings = {'preferred_channels': ['sms', 'phone', 'sms']}
-    assert client.put('/api/preferences', json=settings).status_code == 200
-    assert client.put('/api/preferences', json={'timezone': 'UTC'}).status_code == 200
-    assert client.get('/api/me').json()['preferred_channels'] == ['phone', 'sms']
-    for invalid in (['email'], ['ui'], ['unknown'], 'sms'):
-        assert client.put('/api/preferences', json={'preferred_channels': invalid}).status_code == 422
-    task = client.post('/api/tickets', json={'team_id': 1, 'title': 'Delivery check'}).json()
-    with Session() as db:
-        jobs = db.query(Delivery).filter_by(user_id=2, ticket_id=task['id'], kind='new_ticket').all()
-        assert sorted((job.channel, job.is_primary) for job in jobs) == [
-            ('phone', False), ('sms', False), ('ui', True)]
-    assert client.put('/api/preferences', json={'preferred_channels': []}).status_code == 200
     profile = client.get('/api/me').json()
-    assert (profile['primary_channel'], profile['backup_channel'], profile['preferred_channels']) == ('ui', 'email', [])
+    mapping = profile['ticket_channels']
+    assert set(mapping) == set(profile['ticket_categories'])
+    for invalid in ({}, {**mapping,'task':[]}, {**mapping,'error':['unknown']}):
+        assert client.put('/api/preferences',json={'ticket_channels':invalid}).status_code == 422
+    mapping.update(task=['phone','sms','phone'],change_request=['email'])
+    assert client.put('/api/preferences',json={'ticket_channels':mapping}).status_code == 200
+    assert client.put('/api/preferences',json={'timezone':'UTC'}).status_code == 200
+    assert client.get('/api/me').json()['ticket_channels']['task'] == ['phone','sms']
+    task = client.post('/api/tickets',json={'team_id':1,'title':'Delivery check'}).json()
+    with Session() as db:
+        jobs = db.query(Delivery).filter_by(user_id=2,ticket_id=task['id'],kind='new_ticket')
+        assert sorted(job.channel for job in jobs) == ['phone','sms']
 
 
 def test_seed_matches_all_appendix_schemas_and_falls_through_teams():
@@ -263,16 +262,38 @@ def test_admin_is_not_debug_and_debug_is_not_admin(login):
     assert client.post('/api/rules',json={'team_id':1,'name':'Not allowed'}).status_code==403
 
 
-def test_personal_channel_must_have_distinct_backup(login):
-    client=login(2)
-    assert client.put('/api/preferences',json={'primary_channel':'email','backup_channel':'email'}).status_code==422
-    assert client.put('/api/preferences',json={'primary_channel':'email','backup_channel':'ui'}).status_code==200
-    assert client.get('/api/me').json()['backup_channel']=='ui'
+def test_manager_must_keep_one_policy_per_team(login):
+    manager = login(1)
+    last = manager.get('/api/policies?team=2').json()[0]['id']
+    assert manager.delete(f'/api/policies/{last}').status_code == 409
+    assert manager.post('/api/policies', json={'team_id':2,'severity':'error','channel':'phone'}).status_code == 200
+    assert login(2).delete(f'/api/policies/{last}').status_code == 403
+    manager = login(1)
+    assert manager.delete(f'/api/policies/{last}').status_code == 200
+    remaining = manager.get('/api/policies?team=2').json()
+    assert [p['channel'] for p in remaining] == ['phone']
+
+def test_employee_severity_preferences_route_matching_tickets(login):
+    from app.services.delivery import queue_ticket
+    client = login(2)
+    settings = client.get('/api/me').json()['ticket_channels']
+    settings.update(critical=['phone','sms'],error=['sms'])
+    assert client.put('/api/preferences',json={'ticket_channels':settings}).status_code == 200
+    with Session() as db:
+        for ticket_id, expected in [(2, ['phone','sms']), (1, ['sms','ui'])]:
+            ticket = db.get(Ticket,ticket_id)
+            queue_ticket(db,ticket,'severity_test')
+            jobs = db.query(Delivery).filter_by(user_id=2,ticket_id=ticket_id,kind='severity_test')
+            assert sorted(job.channel for job in jobs) == expected
 
 
-def test_failed_primary_retries_then_distinct_backup(login):
+def email_routes(client):
+    return {category:['email'] for category in client.get('/api/me').json()['ticket_categories']}
+
+
+def test_failed_channel_retries_without_unselected_fallback(login):
     client=login(2)
-    assert client.put('/api/preferences',json={'primary_channel':'email','backup_channel':'ui'}).status_code==200
+    assert client.put('/api/preferences',json={'ticket_channels':email_routes(client)}).status_code==200
     client=login(6)
     assert client.post('/api/debug/channel',json={'name':'email','failing':True}).status_code==200
     payload=copy.deepcopy(WORKFLOW);payload['workflowId']='WF-NOTIFY-UNIQUE'
@@ -282,14 +303,13 @@ def test_failed_primary_retries_then_distinct_backup(login):
     try:
         with Session() as db:
             t=db.query(Ticket).filter_by(title='Settlement failure · WF-NOTIFY-UNIQUE').one()
-            primary=db.query(Delivery).filter_by(ticket_id=t.id,user_id=2,channel='email',is_primary=True).one()
+            primary=db.query(Delivery).filter_by(ticket_id=t.id,user_id=2,channel='email').one()
             from app.models import now
             for _ in range(8):
                 primary.available_at=now()
                 process_deliveries(db);db.commit()
             assert primary.status=='failed' and primary.attempts==6
-            fallback=db.query(Delivery).filter_by(fallback_for=primary.id).one()
-            assert fallback.channel=='ui' and fallback.status=='sent'
+            assert db.query(Delivery).filter_by(fallback_for=primary.id).count()==0
     finally:RETRY_SECONDS[:]=old
 
 
@@ -339,33 +359,22 @@ def test_semantic_markup_and_ui_assets(client):
     assert '--gold:' in css and '--navy:' in css and 'data-severity' in css
 
 
-def test_delivery_digest_groups_multiple_tickets_in_one_window(login):
-    client=login(2)
-    assert client.put('/api/preferences',json={'primary_channel':'email','backup_channel':'ui','buffer_seconds':60}).status_code==200
-    for i in range(3):
-        assert client.post('/api/tickets',json={'team_id':2,'title':f'Independent task {i}'}).status_code==200
+def test_task_policy_queues_external_channel_immediately(login):
+    manager = login(1)
+    assert manager.post('/api/policies',json={'team_id':2,'severity':'task','channel':'phone'}).status_code == 200
+    worker = login(2)
     with Session() as db:
-        latest=[t.id for t in db.query(Ticket).filter(Ticket.title.like('Independent task %'))]
-        jobs=db.query(Delivery).filter_by(user_id=2,channel='email',kind='new_ticket').all()
-        new_jobs=[d for d in jobs if (d.content or {}).get('digest') and any(x['ticket_id'] in latest for x in d.content['entries'])]
-        assert len(new_jobs)==1
-        assert len(new_jobs[0].content['entries'])==3
-        assert new_jobs[0].status=='held'
-
-
-def test_manager_forced_delivery_respects_schedule_by_default(login):
-    client=login(2)
-    assert client.put('/api/preferences',json={'primary_channel':'email','backup_channel':'ui',
-                          'schedule':{'enabled':True,'start':'23:50','end':'23:59','timezone':'Pacific/Honolulu'}}).status_code==200
+        user = db.get(User,2)
+        user.buffer_seconds = 3600
+        user.schedule = {'start':'00:01','end':'00:02','timezone':'UTC'}
+        db.commit()
+    ids = [worker.post('/api/tickets',json={'team_id':2,'title':str(i)}).json()['id'] for i in range(2)]
     with Session() as db:
-        from app.models import Policy
-        db.add(Policy(team_id=2,severity='all',channel='email',kind='new_ticket',target='all',ignore_schedule=False));db.commit()
-    assert client.post('/api/tickets',json={'team_id':2,'title':'Out of hours task'}).status_code==200
-    with Session() as db:
-        t=db.query(Ticket).filter_by(title='Out of hours task').one()
-        job=db.query(Delivery).filter_by(user_id=2,ticket_id=t.id,channel='email',kind='new_ticket').one()
-        assert job.status=='held'
-        assert job.available_at.replace(tzinfo=__import__('datetime').timezone.utc)>__import__('datetime').datetime.now(__import__('datetime').timezone.utc)
+        jobs = db.query(Delivery).filter(Delivery.ticket_id.in_(ids),Delivery.user_id==2,Delivery.channel=='phone').all()
+        assert sorted(job.ticket_id for job in jobs) == sorted(ids)
+        assert all(job.status=='queued' and 'digest' not in job.content for job in jobs)
+        process_deliveries(db)
+        assert all(job.status=='sent' for job in jobs)
 
 
 def test_manager_signed_live_rule_config_is_atomic_and_auth_checked(login,tmp_path):
@@ -414,3 +423,127 @@ def test_explicit_manager_only_history_purge_retains_tombstone(login):
         assert db.get(Ticket,1).state=='purged'
         assert all(e.raw=='[explicitly purged]' for e in db.query(Event).filter_by(ticket_id=1))
         assert db.query(Audit).filter_by(ticket_id=1,action='ticket_purged_tombstone').count()==1
+
+
+def test_delivery_log_pages_visible_rows_before_applying_limit(login):
+    with Session() as db:
+        for i in range(180):
+            db.add(Delivery(user_id=2 if i < 52 else 7,channel='ui',kind='page_test',
+                            idempotency_key=f'page-test-{i}'))
+        db.commit()
+        expected = [job.id for job in db.query(Delivery).filter_by(user_id=2).order_by(Delivery.id.desc())]
+    client = login(2)
+    received = []
+    for page in range(1,(len(expected)+24)//25+1):
+        result = client.get('/api/delivery',params={'page':page}).json()
+        assert result['total'] == len(expected)
+        ids = [job['id'] for job in result['items']]
+        assert ids == expected[(page-1)*25:page*25]
+        received.extend(ids)
+    assert received == expected
+
+
+def test_admin_onboards_employee_and_manager_controls_team_roster(login):
+    data = {'name':'New Employee','email':'new@example.org'}
+    assert login(1).post('/api/admin/users',json=data).status_code == 403
+    admin = login(5)
+    response = admin.post('/api/admin/users',json=data)
+    assert response.status_code == 201
+    employee = response.json()
+    assert employee['role'] == 'E'
+    assert admin.post('/api/admin/users',json=data).status_code == 409
+    manager = login(1)
+    assert employee['id'] in [e['id'] for e in manager.get('/api/organization').json()['employees']]
+    payload = {'user_id':employee['id'],'action':'add'}
+    assert login(4).post('/api/teams/1/members',json=payload).status_code == 403
+    assert login(1).post('/api/teams/1/members',json=payload).status_code == 200
+    def report_ids():
+        return [person['id'] for person in manager.get('/api/organization').json()['reports']]
+    assert employee['id'] in report_ids()
+    assert manager.post('/api/teams/2/members',json=payload).status_code == 200
+    assert report_ids().count(employee['id']) == 1
+    assert 1 in [team['id'] for team in login(employee['id']).get('/api/me').json()['teams']]
+    payload['action'] = 'remove'
+    assert login(1).post('/api/teams/1/members',json=payload).status_code == 200
+    assert employee['id'] in report_ids()
+    assert manager.post('/api/teams/2/members',json=payload).status_code == 200
+    assert employee['id'] not in report_ids()
+    assert login(employee['id']).get('/api/me').json()['teams'] == []
+
+
+def test_direct_report_remains_until_last_managed_team_membership_ends(login):
+    manager = login(1)
+    def reports():
+        return [person['id'] for person in manager.get('/api/organization').json()['reports']]
+    def change(team, action):
+        response = manager.post(f'/api/teams/{team}/members',json={'user_id':2,'action':action})
+        assert response.status_code == 200
+    assert reports().count(2) == 1
+    change(1,'remove')
+    assert 2 in reports()
+    change(2,'remove')
+    assert 2 not in reports()
+    change(1,'add')
+    assert 2 in reports()
+
+
+def test_manager_deletes_rule_preserving_ticket_history(login):
+    manager = login(1)
+    with Session() as db:
+        rule_id = db.get(Ticket,2).rule_id
+    url = f'/api/rules/{rule_id}'
+    assert login(4).delete(url+'?permanent=true').status_code == 403
+    manager = login(1)
+    assert manager.delete(url).status_code == 200
+    assert any(r['id']==rule_id and not r['enabled'] for r in manager.get('/api/rules?team=1').json())
+    assert manager.delete(url+'?permanent=true').status_code == 200
+    assert all(r['id']!=rule_id for r in manager.get('/api/rules?team=1').json())
+    assert manager.put(url,json={'enabled':True}).status_code == 404
+    assert manager.get('/api/tickets/2').json()['rule_id'] == rule_id
+
+
+@pytest.mark.parametrize('category', ['critical','error','warning','info','task','change_request'])
+def test_manager_claims_unmatched_event_once(login,category):
+    payload = {'unknown':'manual triage'}
+    assert login(6).post('/api/debug/generate',json={'event':payload}).status_code == 200
+    event = login(1).get('/api/unmatched').json()[0]
+    path = f"/api/unmatched/{event['id']}/claim"
+    assert login(2).post(path,json={'team_id':1,'category':category}).status_code == 403
+    assert login(4).post(path,json={'team_id':1,'category':category}).status_code == 403
+    manager = login(1)
+    assert manager.post(path,json={'team_id':1}).status_code == 422
+    assert manager.post(path,json={'team_id':1,'category':'invalid'}).status_code == 422
+    response = manager.post(path,json={'team_id':1,'category':category})
+    assert response.status_code == 200
+    ticket = response.json()
+    assert ticket['team_id']==1 and ticket['members']==[1] and ticket['state']=='new'
+    assert manager.get(f"/api/tickets/{ticket['id']}").json()['first_payload']==payload
+    assert all(e['id']!=event['id'] for e in manager.get('/api/unmatched').json())
+    assert manager.post(path,json={'team_id':2,'category':category}).status_code == 409
+    assert ticket['type'] == (category if category in ('task','change_request') else 'incident')
+    assert ticket['severity'] == (category if ticket['type']=='incident' else 'info')
+    assert ticket['id'] in [row['id'] for row in manager.get('/api/board?my_tickets=true').json()['tickets']]
+    assert ticket['id'] in [row['id'] for row in login(2).get('/api/board?team=1').json()['tickets']]
+    if category=='change_request':
+        assert any(p['ticket_id']==ticket['id'] for p in login(1).get('/api/proposals').json())
+    with Session() as db:
+        assert db.query(Ticket).filter_by(event_id=event['id']).count()==1
+        assert db.get(Event,event['id']).ticket_id==ticket['id']
+
+
+def test_admin_promotes_employee_and_assigns_team_members(login):
+    admin = login(5)
+    new = admin.post('/api/admin/users',json={'name':'New lead','email':'lead@example.org'}).json()['id']
+    assert admin.post('/api/teams/3/members',json={'user_id':new}).status_code == 200
+    path = '/api/admin/teams/1/manager'
+    assignment = {'user_id':new,'previous_leader_id':1}
+    assert login(1).put(path,json=assignment).status_code == 403
+    admin = login(5)
+    assert admin.put(path,json=assignment).status_code == 200
+    assert admin.put(path,json={'user_id':2,'previous_leader_id':1}).status_code == 409
+    assert admin.post('/api/teams/1/members',json={'action':'remove','user_id':new}).status_code == 409
+    lead = login(new)
+    assert lead.get('/api/me').json()['role'] == 'M'
+    assert lead.post('/api/teams/1/members',json={'user_id':7}).status_code == 200
+    assert lead.post('/api/teams/3/members',json={'user_id':2}).status_code == 403
+    assert login(1).post('/api/teams/1/members',json={'action':'remove','user_id':7}).status_code == 403

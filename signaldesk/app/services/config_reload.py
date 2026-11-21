@@ -8,7 +8,7 @@ Invalid/replayed-bad manifests have no side effects; last good rules stay enable
 import hashlib,hmac,json,logging,os
 from pathlib import Path
 from sqlalchemy.orm import Session
-from ..models import User,Team,Rule,Runbook
+from ..models import User,Team,Rule,Runbook,current_rules
 from .conditions import validate
 from .records import audit
 
@@ -74,7 +74,7 @@ def validate_manifest(db:Session,manifest:dict)->list[dict]:
 def apply_signed_manifest(db:Session,manifest:dict)->dict:
     rules=validate_manifest(db,manifest)  # entire manifest checked before ANY mutation
     tid=int(manifest['team_id']);actor=db.get(User,int(manifest['manager_id']))
-    current={r.name:r for r in db.query(Rule).filter_by(team_id=tid)}
+    current={r.name:r for r in current_rules(db).filter_by(team_id=tid)}
     changed=0
     for data in rules:
         name=data['name'];old=current.get(name)

@@ -1,24 +1,34 @@
 """Durable notification jobs, schedule/buffer calculation, adapter isolation and fallback."""
 import os,smtplib
 from email.message import EmailMessage
-from datetime import datetime,timedelta,timezone
-from zoneinfo import ZoneInfo
+from datetime import timedelta
 from sqlalchemy.orm import Session
 from ..models import Delivery,ChannelState,User,Team,Membership,Policy,now
 from .records import audit
 
 class ChannelRegistry:
-    def __init__(self):self.senders={}
-    def register(self,name,fn):self.senders[name]=fn
+    def __init__(self):
+        self.senders = {}
+        self.labels = {}
+        self.contact_fields = {}
+
+    def register(self, name, fn, label=None, contact=None):
+        self.senders[name] = fn
+        self.labels[name] = label or name.title()
+        self.contact_fields[name] = contact
+
+    def available(self, user):
+        return {name: label for name, label in self.labels.items()
+                if not self.contact_fields[name] or getattr(user,self.contact_fields[name],None)}
     def send(self,name,job,user):
         sender=self.senders.get(name)
         if not sender:raise ValueError('Unknown notification channel')
         return sender(job,user)
 
 channels=ChannelRegistry()
-channels.register('ui',lambda job,user:True)
-channels.register('sms',lambda job,user:True) # Captured in Delivery outbox
-channels.register('phone',lambda job,user:True) # Captured in Delivery outbox
+channels.register('ui',lambda job,user:True, label='UI')
+channels.register('sms',lambda job,user:True, label='SMS', contact='phone') # Captured in Delivery outbox
+channels.register('phone',lambda job,user:True, label='Phone call', contact='phone') # Captured in Delivery outbox
 
 def email_sender(job,user):
     host=os.getenv('SMTP_HOST')
@@ -30,60 +40,30 @@ def email_sender(job,user):
     msg.set_content(job.content.get('body',''))
     with smtplib.SMTP(host,int(os.getenv('SMTP_PORT','1025')),timeout=5) as smtp:smtp.send_message(msg)
     return True
-channels.register('email',email_sender)
+channels.register('email',email_sender, contact='email')
+
+TICKET_CATEGORIES = {'critical':'Critical incident', 'error':'Error incident', 'warning':'Warning incident',
+                     'info':'Informational incident', 'task':'Task', 'change_request':'Change request'}
+
+def ticket_channels(user):
+    """Preserve existing direct routes until the employee saves their new selections."""
+    saved = user.delivery_preferences.channels if user.delivery_preferences else {}
+    available = channels.available(user)
+    result = {}
+    for category in TICKET_CATEGORIES:
+        severity = category if category not in ('task','change_request') else 'info'
+        previous = [user.primary_channel, *user.preferred_channels, *user.severity_channels.get(severity, [])]
+        choices = saved.get(category, previous)
+        result[category] = sorted(set(choices).intersection(available)) or ['ui']
+    return result
 
 RETRY_SECONDS=[30,120,600,1800,7200]
-def next_window(user:User,dt:datetime)->datetime:
-    """Return current instant if inside daily local window; next start otherwise."""
-    window=user.schedule or {}
-    if window.get('enabled') is False:return dt
-    zone=ZoneInfo(window.get('timezone') or 'UTC')
-    local=dt.astimezone(zone)
-    try:
-        h1,m1=map(int,window.get('start','00:00').split(':'))
-        h2,m2=map(int,window.get('end','23:59').split(':'))
-        minute=local.hour*60+local.minute
-        start=h1*60+m1;end=h2*60+m2
-        if start<=minute<=end:return dt
-        candidate=local.replace(hour=h1,minute=m1,second=0,microsecond=0)
-        if minute>end:candidate+=timedelta(days=1)
-        return candidate.astimezone(timezone.utc)
-    except (ValueError,OverflowError):return dt
-
-def queue_one(db:Session,user:User,ticket,channel,kind,summary,key,forced=False,is_primary=False,ignore_schedule=False):
-    from sqlalchemy.exc import IntegrityError
+def queue_one(db:Session,user:User,ticket,channel,kind,summary,key):
     existing=db.query(Delivery).filter_by(idempotency_key=key).first()
     if existing:return existing
-    current=now();scheduled=current if ignore_schedule else next_window(user,current)
-    if channel!='ui':scheduled=max(scheduled,current+timedelta(seconds=max(0,user.buffer_seconds)))
-    # The first job opens a fixed per-recipient/channel delivery window. Subsequent
-    # independent ticket events join the same durable job; no schedule postponement.
-    # The original event keys are retained inside the digest for idempotent replay.
-    if channel!='ui' and user.buffer_seconds and not kind.endswith('_fallback'):
-        pending=(db.query(Delivery).filter(Delivery.user_id==user.id,
-                         Delivery.channel==channel,Delivery.status.in_(['queued','held']),
-                         Delivery.is_primary==is_primary,Delivery.available_at>current)
-                 .order_by(Delivery.available_at,Delivery.id).all())
-        for job in pending:
-            entries=(job.content or {}).get('entries')
-            if not entries or not (job.content or {}).get('digest'):continue
-            if any(entry['key']==key for entry in entries):return job
-            job_time=job.available_at.replace(tzinfo=timezone.utc) if job.available_at.tzinfo is None else job.available_at
-            if job_time>current+timedelta(seconds=max(0,user.buffer_seconds)+60):continue
-            entries=[*entries,{'key':key,'ticket_id':ticket.id if ticket else None,
-                               'kind':kind,'title':summary.get('title','')}]
-            content={**job.content,'entries':entries,'count':len(entries),
-                     'title':f'{len(entries)} updates across {len({x["ticket_id"] for x in entries})} tickets',
-                     'body':'\n'.join(f"• #{x['ticket_id']} {x['kind']}: {x['title']}" for x in entries)}
-            job.content=content
-            return job
-    if channel!='ui' and user.buffer_seconds:
-        summary={**summary,'digest':True,'count':1,
-                 'entries':[{'key':key,'ticket_id':ticket.id if ticket else None,
-                             'kind':kind,'title':summary.get('title','')}]}
     job=Delivery(user_id=user.id,ticket_id=ticket.id if ticket else None,
-                 channel=channel,kind=kind,status='held' if scheduled>current else 'queued',
-                 idempotency_key=key,content=summary,available_at=scheduled,is_primary=is_primary)
+                 channel=channel,kind=kind,status='queued',
+                 idempotency_key=key,content=summary,available_at=now())
     db.add(job)
     return job
 
@@ -101,11 +81,12 @@ def queue_ticket(db,ticket,kind='new_ticket',extra_users=None):
     elif isinstance(recipients,list):targets={int(uid) for uid in recipients}
     else:targets=set(member_ids)
     if team and not (kind=='assigned' and extra_users):targets.add(team.leader_id)
+    category = ticket.type if ticket.type in ('task','change_request') else ticket.severity
     policies=db.query(Policy).filter_by(team_id=ticket.team_id).all()
     # Forced policies reach their eligible members even when not selected by a
     # particular rule's optional recipient list.
     for p in policies:
-        if p.kind not in ('all',kind) or p.severity not in ('all',ticket.severity):continue
+        if p.kind not in ('all',kind) or p.severity not in ('all',category):continue
         if p.target=='all':targets.update(member_ids)
         elif p.target=='maintainers':targets.update(m.user_id for m in db.query(Membership).filter_by(team_id=ticket.team_id,maintainer=True))
         elif p.target.startswith('user:'):
@@ -115,26 +96,26 @@ def queue_ticket(db,ticket,kind='new_ticket',extra_users=None):
         user=db.get(User,uid)
         if not user:continue
         blocked=(user.subscriptions or {}).get(ticket.severity) is False
-        applicable=[p for p in policies if (p.severity in ('all',ticket.severity)) and p.kind in ('all',kind)
+        applicable=[p for p in policies if (p.severity in ('all',category)) and p.kind in ('all',kind)
                     and (p.target=='all' and uid in member_ids or p.target=='maintainers' and
                          bool(db.get(Membership,(uid,ticket.team_id)) and db.get(Membership,(uid,ticket.team_id)).maintainer)
                          or p.target==f'user:{uid}')]
         forced={p.channel for p in applicable}
         mandatory=set(routing.get('mandatory_channels',[]))
-        channels=forced|mandatory
+        selected=forced|mandatory
         if not blocked:
-            channels.add(user.primary_channel)
-            channels.update(user.preferred_channels)
+            routes = ticket_channels(user)
+            selected.update(routes.get(category, routes['info']))
         summary={'title':ticket.title,'body':f'{ticket.body}\nTicket #{ticket.id}\nRunbook: /#ticket-{ticket.id}',
                  'ticket_id':ticket.id,'count':ticket.occurrences,'kind':kind}
-        for channel in channels:
-            if channel not in ('ui','email','sms','phone'):continue
+        for channel in selected:
+            if channel not in channels.senders:continue
             key=f'{ticket.id}:{kind}:{uid}:{channel}'
-            queue_one(db,user,ticket,channel,kind,summary,key,forced=(channel in forced or channel in mandatory),is_primary=(channel==user.primary_channel),ignore_schedule=any(p.channel==channel and p.ignore_schedule for p in applicable))
+            queue_one(db,user,ticket,channel,kind,summary,key)
 
 def process_deliveries(db:Session,limit=100):
     count=0;current=now()
-    q=(db.query(Delivery).filter(Delivery.status.in_(['queued','held','retrying']),Delivery.available_at<=current)
+    q=(db.query(Delivery).filter((Delivery.status=='held') | (Delivery.status.in_(['queued','retrying']) & (Delivery.available_at<=current)))
        .order_by(Delivery.available_at,Delivery.id))
     # The same job must not be submitted concurrently by two processing pods.
     if db.bind.dialect.name=='postgresql':q=q.with_for_update(skip_locked=True)
@@ -152,10 +133,6 @@ def process_deliveries(db:Session,limit=100):
                 job.status='retrying';job.available_at=now()+timedelta(seconds=RETRY_SECONDS[job.attempts-1])
             else:
                 job.status='failed'
-                if job.is_primary and user.backup_channel!=job.channel:
-                    fallback_key=job.idempotency_key+':fallback'
-                    fallback=queue_one(db,user,db.get(__import__('app.models',fromlist=['Ticket']).Ticket,job.ticket_id) if job.ticket_id else None,user.backup_channel,job.kind,job.content,fallback_key)
-                    fallback.fallback_for=job.id
                 audit(db,'delivery_failed',ticket_id=job.ticket_id,detail={'channel':job.channel,'user_id':job.user_id})
         count+=1
     return count

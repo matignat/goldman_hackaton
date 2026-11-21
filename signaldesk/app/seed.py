@@ -5,7 +5,7 @@ from .models import User,Team,Membership,Source,Rule,Runbook,ChannelState,Policy
 from .services.runbooks import formats
 from .services.ingestion import ingest
 from .services.routing import pump_events
-from .services.delivery import process_deliveries
+from .services.delivery import channels,process_deliveries
 from .services.records import audit,activity
 
 WORKFLOW={"type":"WORKFLOW_FAILED","workflowId":"WF-20261023-00042","workflowName":"order-settlement","step":"validate-counterparty","severity":"ERROR","environment":"prod","timestamp":"2026-10-23T09:14:02.331Z","error":{"code":"TIMEOUT","message":"Counterparty service did not respond in 5000 ms"}}
@@ -41,7 +41,10 @@ RATES_TEXT='Review {{payload.tradeId}} on desk {{payload.desk}}, confirm notiona
 def seed():
     init_db()
     with session_scope() as db:
-        if db.query(User).first():return
+        if db.query(User).first():
+            for team in db.query(Team).filter(~db.query(Policy.id).filter(Policy.team_id==Team.id).exists()):
+                db.add(Policy(team_id=team.id,severity='critical',channel='ui'))
+            return
         users=[
             User(name='Morgan Blake',role='M',email='morgan@signaldesk.local',phone='+15550001001',primary_channel='ui',backup_channel='email',preset='engineer'),
             User(name='Avery Chen',role='E',email='avery@signaldesk.local',phone='+15550001002',primary_channel='ui',backup_channel='email',preset='engineer'),
@@ -64,8 +67,8 @@ def seed():
                     Membership(user_id=nora.id,team_id=payments.id,maintainer=True),Membership(user_id=nora.id,team_id=settlements.id,maintainer=True),
                     Membership(user_id=olivia.id,team_id=rates.id),Membership(user_id=olivia.id,team_id=pricing.id),
                     Membership(user_id=sofia.id,team_id=rates.id),Membership(user_id=sofia.id,team_id=pricing.id)])
-        for channel in ('ui','email','sms','phone'):db.add(ChannelState(name=channel,failing=False))
-        db.add(Policy(team_id=payments.id,severity='critical',channel='ui',kind='new_ticket',target='all'))
+        for channel in channels.senders:db.add(ChannelState(name=channel,failing=False))
+        db.add_all(Policy(team_id=team.id,severity='critical',channel='ui') for team in teams)
         rb_pay=Runbook(team_id=payments.id,name='High error rate · payments',source_format='markdown',source_text=PAYMENTS_MD,steps=formats.parse('markdown',PAYMENTS_MD))
         rb_set=Runbook(team_id=settlements.id,name='Settlement timeout recovery',source_format='yaml',source_text=SETTLEMENT_YAML,steps=formats.parse('yaml',SETTLEMENT_YAML))
         rb_rates=Runbook(team_id=rates.id,name='Trade rejection',source_format='text',source_text=RATES_TEXT,steps=formats.parse('text',RATES_TEXT))

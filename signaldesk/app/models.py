@@ -19,6 +19,13 @@ class User(Base):
         cascade="all, delete-orphan", lazy="selectin", order_by="PreferredChannel.channel"
     )
 
+    delivery_preferences: Mapped["TicketDeliveryPreferences | None"] = relationship(cascade="all, delete-orphan", lazy="selectin")
+    severity_preferences: Mapped["SeverityPreferences | None"] = relationship(cascade="all, delete-orphan", lazy="selectin")
+
+    @property
+    def severity_channels(self):
+        return self.severity_preferences.channels if self.severity_preferences else {}
+
     @property
     def preferred_channels(self):
         return [item.channel for item in self.extra_channels]
@@ -29,6 +36,18 @@ class User(Base):
     preset: Mapped[str] = mapped_column(String(24), default='engineer')
     timezone: Mapped[str] = mapped_column(String(48), default='Europe/Warsaw')
     debug_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+
+class SeverityPreferences(Base):
+    __tablename__ = 'user_severity_preferences'
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), primary_key=True)
+    channels: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class TicketDeliveryPreferences(Base):
+    __tablename__ = 'ticket_delivery_preferences'
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), primary_key=True)
+    channels: Mapped[dict] = mapped_column(JSON)
+
 
 class PreferredChannel(Base):
     __tablename__ = 'user_preferred_channels'
@@ -76,6 +95,15 @@ class Rule(Base):
     throttle_seconds: Mapped[int] = mapped_column(Integer, default=0)
     runbook_id: Mapped[int|None] = mapped_column(ForeignKey('runbooks.id'), nullable=True)
     version: Mapped[int] = mapped_column(Integer, default=1)
+
+class DeletedRule(Base):
+    __tablename__ = 'deleted_rules'
+    rule_id: Mapped[int] = mapped_column(ForeignKey('rules.id'), primary_key=True)
+
+
+def current_rules(db):
+    return db.query(Rule).filter(~Rule.id.in_(db.query(DeletedRule.rule_id)))
+
 
 class Runbook(Base):
     __tablename__ = 'runbooks'
