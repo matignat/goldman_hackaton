@@ -1,0 +1,46 @@
+name: signaldesk
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: signal
+      POSTGRES_PASSWORD: signal
+      POSTGRES_DB: signaldesk
+    volumes:
+      - signaldesk_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U signal -d signaldesk"]
+      interval: 2s
+      retries: 20
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    ports: ["15672:15672"]
+    volumes:
+      - signaldesk_rabbit:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      retries: 20
+  mailpit:
+    image: axllent/mailpit:v1.27
+    ports: ["8025:8025"]
+  api:
+    build: .
+    env_file: .env
+    command: ["sh", "-c", "python -m app.seed && uvicorn app.api:app --host 0.0.0.0 --port 8000"]
+    ports: ["8000:8000"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      rabbitmq: {condition: service_healthy}
+  worker:
+    build: .
+    volumes:
+      - ./config/rules:/srv/config/rules:ro
+    env_file: .env
+    command: ["python", "-m", "app.worker"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      rabbitmq: {condition: service_healthy}
+volumes:
+  signaldesk_db:
+  signaldesk_rabbit:

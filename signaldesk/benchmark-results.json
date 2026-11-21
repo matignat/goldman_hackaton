@@ -1,0 +1,37 @@
+{
+  "system": "SQLite local single-process test; real DB writes, deterministic matching, captured channel adapters",
+  "measured_at": "2026-11-21T05:25:12.285828+00:00",
+  "input": {
+    "burst": 500,
+    "mixed": 80,
+    "unmatched": 20
+  },
+  "ingestion": {
+    "events": 600,
+    "seconds": 0.445,
+    "events_per_second": 1348.16
+  },
+  "matching": {
+    "seconds": 1.671,
+    "events_per_second": 358.97,
+    "ingest_to_processing_p50_ms": 882.13,
+    "ingest_to_processing_p99_ms": 1672.88,
+    "processed": 600,
+    "unmatched": 20
+  },
+  "delivery": {
+    "processing_seconds": 0.202,
+    "jobs_created": 324,
+    "sent": 324,
+    "queued_or_held": 0,
+    "ingest_to_captured_channel_p50_ms": 1823.73,
+    "ingest_to_captured_channel_p99_ms": 1885.55
+  },
+  "burst_result": {
+    "single_ticket": true,
+    "occurrences": 500,
+    "new_ticket_delivery_jobs": 4,
+    "note": "one delivery job per selected recipient/channel; not one global delivery"
+  },
+  "caveats": "SQLite and capture-only channels; UI SSE browser push and real SMTP/network delivery were NOT measured."
+}

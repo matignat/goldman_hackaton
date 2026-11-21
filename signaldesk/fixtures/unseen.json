@@ -1,0 +1,1 @@
+{"envelope":{"kind":"CUSTOM_UPSTREAM_FAILURE","facility":{"component":"risk-engine","instance":"risk-eu-4"},"signal":{"level":"CRITICAL","details":{"identifier":42,"text":"Unknown nested schema from judge"}}},"timestamp":"2026-11-21T10:00:00Z"}
