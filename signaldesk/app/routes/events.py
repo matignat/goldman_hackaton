@@ -89,6 +89,8 @@ def debug_generate(
     s = db.query(Source).filter_by(slug="demo").first()
     if not s:
         raise HTTPException(503, "Demo source not configured")
+    if not s.enabled:
+        raise HTTPException(409, "Ask a platform admin to configure routing and enable the demo source.")
     payload = data.get(
         "event",
         {
@@ -98,10 +100,16 @@ def debug_generate(
             "annotations": {"summary": "Demo error rate high"},
         },
     )
-    count = min(1000, max(1, int(data.get("count", 1))))
+    try:
+        count = min(1000, max(1, int(data.get("count", 1))))
+    except (ValueError, TypeError, OverflowError):
+        raise HTTPException(422, "Occurrences must be a number") from None
     raw = json.dumps(payload)
-    for i in range(count):
-        ingest(db, s, raw)
+    try:
+        for _ in range(count):
+            ingest(db, s, raw)
+    except ValueError as exc:
+        raise HTTPException(413, str(exc)) from exc
     db.commit()
     if os.getenv("DEMO_INLINE_WORKER", "0") == "1":
         pump_events(db, limit=count)

@@ -60,6 +60,19 @@ def test_flood_500_events_is_one_ticket_and_one_initial_notification():
         assert db.query(Delivery).filter_by(ticket_id=2, kind="new_ticket").count() <= 4
 
 
+def test_debug_generator_reports_disabled_source(login):
+    with Session() as db:
+        source = db.query(Source).filter_by(slug="demo").one()
+        source.enabled = False
+        db.commit()
+
+    response = login(6).post("/api/debug/generate", json={"count": 2})
+    assert response.status_code == 409
+    assert "enable the demo source" in response.json()["detail"]
+    with Session() as db:
+        assert db.query(Event).filter_by(source_id=source.id).count() == 0
+
+
 def test_unmatched_event_survives_and_invalid_payload_is_rejected(login):
     client = login(6)
     r = client.post(
