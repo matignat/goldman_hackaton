@@ -104,6 +104,9 @@ def test_recovery_to_done_then_relapse_before_approval(login):
 def test_manager_can_approve_own_incident(login):
     client = login(1)
     path = '/api/tickets/2'
+    assert client.post(path + '/move', json={'state':'done'}).status_code == 409
+    complete_runbook(login, 2, 3)
+    client = login(1)
     assert client.post(path + '/move', json={'state': 'done'}).status_code == 200
     ticket = client.get(path).json()
     assert ticket['type'] == 'incident' and ticket['permissions']['can_approve']
@@ -127,7 +130,7 @@ def complete_runbook(login, ticket_id, worker):
         if step.get('approval') == 'required':
             assert login(1).post(url + '/approve').status_code == 200
             client = login(worker)
-            assert client.post(url + '/run').status_code == 200
+            assert client.get(path).json()['runbook_steps'][index]['status'] == 'done'
 
 
 def test_maintainer_needs_another_approver(login):
@@ -172,12 +175,40 @@ def test_risky_runbook_action_is_manager_only(login):
         assert t.runbook_steps[2]['status']=='waiting_approval'
     client=login(3)
     assert client.post('/api/tickets/1/steps/2/approve').status_code==403
+    assert client.post('/api/tickets/1/steps/2/reject').status_code==403
+    client=login(1)
+    assert client.post('/api/tickets/1/steps/2/reject').status_code==200
+    assert client.post('/api/tickets/1/steps/2/approve').status_code==409
+    assert login(2).post('/api/tickets/1/steps/2/run').status_code==200
     client=login(1)
     assert client.post('/api/tickets/1/steps/2/approve').status_code==200
-    client=login(2)
-    assert client.post('/api/tickets/1/steps/2/run').status_code==200
+    assert client.post('/api/tickets/1/steps/2/approve').status_code==409
     with Session() as db:
         assert db.get(Ticket,1).runbook_steps[2]['status']=='done'
+
+
+def test_later_steps_wait_for_approved_completion(login):
+    with Session() as db:
+        ticket = db.get(Ticket, 1)
+        ticket.runbook_steps = [dict(ticket.runbook_steps[0], approval='required'), *ticket.runbook_steps[1:]]
+        db.commit()
+    path = '/api/tickets/1'
+    first = path + '/steps/0'
+    later = path + '/steps/1/run'
+    worker = login(2)
+    assert worker.post(path + '/move', json={'state': 'in_progress'}).status_code == 200
+    assert worker.get(path).json()['approval_gate_index'] == 0
+    assert worker.post(later).status_code == 409
+    assert worker.post(first + '/run').status_code == 200
+    assert worker.post(path + '/steps/2/run').status_code == 409
+    assert login(1).post(first + '/reject').status_code == 200
+    worker = login(2)
+    assert worker.post(later).status_code == 409
+    assert worker.post(first + '/run').status_code == 200
+    assert login(1).post(first + '/approve').status_code == 200
+    worker = login(2)
+    assert worker.get(path).json()['approval_gate_index'] == 2
+    assert worker.post(later).status_code == 200
 
 
 def test_manager_only_rule_runbook_and_proposals(login):
@@ -202,6 +233,10 @@ def test_manager_only_rule_runbook_and_proposals(login):
 
 
 def test_archive_critical_only_default_toggle_errors_and_handled_history(login):
+    # This archive fixture has no runbook action that changes its severity.
+    with Session() as db:
+        db.get(Ticket,1).runbook_steps=[]
+        db.commit()
     client=login(1)
     assert client.post('/api/tickets/1/move',json={'state':'done'}).status_code==200
     client=login(1)

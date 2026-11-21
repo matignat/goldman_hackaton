@@ -46,10 +46,22 @@ def team_dict(db,t):
     return {'id':t.id,'name':t.name,'slug':t.slug,'leader_id':t.leader_id,'leader_name':leader.name if leader else '',
             'members':[{'id':m.user_id,'name':db.get(User,m.user_id).name,'maintainer':m.maintainer} for m in db.query(Membership).filter_by(team_id=t.id).all()]}
 
+def first_approval_gate(steps):
+    for index, step in enumerate(steps or []):
+        if step.get('approval') == 'required' and (not step.get('approved_by') or step.get('status') != 'done'):
+            return index
+    return None
+
+def require_step_unlocked(steps, index):
+    gate = first_approval_gate(steps)
+    if gate is not None and index > gate:
+        raise HTTPException(409, f'Step {gate + 1} needs manager approval and completion first')
+
 def ticket_dict(t,detail=False):
     keys=['id','team_id','rule_id','source_id','event_id','type','state','incident_status','title','body','severity','environment','schema','occurred_at','last_occurrence_at','created_at','updated_at','resolved_at','archived_at','occurrences','flags','members','runbook_steps','done_by','approved_by','recurrence_of']
     x=row(t,keys)
     x['display_id']=f'TKT-{t.id:05d}'
+    if detail:x['approval_gate_index'] = first_approval_gate(t.runbook_steps)
     if detail:x.update(row(t,['first_payload','latest_payload','samples','fingerprint']))
     return x
 
@@ -184,9 +196,11 @@ def move(ticket_id:int,data:dict=Body(...),u:User=Depends(current_user),db:Sessi
         previous = 'new' if dest=='acknowledged' else 'acknowledged'
         if t.state != previous:
             raise HTTPException(409, 'Acknowledge the ticket before starting work')
+    if dest=='done' and any(step.get('status')!='done' for step in t.runbook_steps or []):
+        raise HTTPException(409, 'Complete every runbook step before marking the ticket Done')
     if dest=='done' and not is_manager(db,u,t.team_id):
         require(u.id in (t.members or []), 'Join the ticket before marking it Done')
-        if t.state!='in_progress' or any(step.get('status')!='done' for step in t.runbook_steps or []):
+        if t.state!='in_progress':
             raise HTTPException(409, 'Start work and complete every runbook step before marking the ticket Done')
     if t.state=='done' and dest!='done':raise HTTPException(409,'Only rejection or relapse reopens Done')
     old=t.state;t.state=dest;t.updated_at=now()
@@ -241,7 +255,7 @@ def acknowledge_attention(ticket_id:int,u:User=Depends(current_user),db:Session=
 
 @app.post('/api/tickets/{ticket_id}/steps/{step_idx}/run')
 def run_step(ticket_id:int,step_idx:int,u:User=Depends(current_user),db:Session=Depends(db_session)):
-    t=db.get(Ticket,ticket_id)
+    t=db.get(Ticket,ticket_id,with_for_update=True)
     if not t:raise HTTPException(404)
     require(can_work(db,u,t) and t.state!='archived' and not is_guest(db,u,t.team_id))
     require(u.id in (t.members or []), 'Join the ticket before running a step')
@@ -249,14 +263,19 @@ def run_step(ticket_id:int,step_idx:int,u:User=Depends(current_user),db:Session=
         raise HTTPException(409, 'Acknowledge the ticket and start work before running a step')
     steps=list(t.runbook_steps or [])
     if not 0<=step_idx<len(steps):raise HTTPException(404,'Step not found')
+    require_step_unlocked(steps, step_idx)
     step={**steps[step_idx]}
     if step.get('status')=='done':raise HTTPException(409,'Step already complete')
+    if step.get('status')=='waiting_approval':raise HTTPException(409,'Step already awaiting review')
     if step.get('approval')=='required' and not step.get('approved_by'):
         step['status']='waiting_approval';steps[step_idx]=step;t.runbook_steps=steps
         t.flags=list(set((t.flags or [])+['action_approval']))
         audit(db,'action_approval_requested',t.team_id,t.id,u,{'step':step_idx})
         queue_ticket(db,t,'action_approval_needed');db.commit()
         return ticket_dict(t)
+    return complete_step(db,t,u,steps,step_idx,step)
+
+def complete_step(db,t,u,steps,step_idx,step):
     try:
         outcome=actions.execute(step['action'],step.get('params',{}),t,db) if step.get('type')=='action' else {'status':'completed_manual'}
         step.update(status='done',done_by=u.id,outcome=outcome)
@@ -268,16 +287,32 @@ def run_step(ticket_id:int,step_idx:int,u:User=Depends(current_user),db:Session=
 
 @app.post('/api/tickets/{ticket_id}/steps/{step_idx}/approve')
 def approve_step(ticket_id:int,step_idx:int,u:User=Depends(current_user),db:Session=Depends(db_session)):
-    t=db.get(Ticket,ticket_id)
+    return review_step(db,u,ticket_id,step_idx,approve=True)
+
+@app.post('/api/tickets/{ticket_id}/steps/{step_idx}/reject')
+def reject_step(ticket_id:int,step_idx:int,u:User=Depends(current_user),db:Session=Depends(db_session)):
+    return review_step(db,u,ticket_id,step_idx,approve=False)
+
+def review_step(db,u,ticket_id,step_idx,approve):
+    t=db.get(Ticket,ticket_id,with_for_update=True)
     if not t:raise HTTPException(404)
-    require(is_manager(db,u,t.team_id),'Only designated team manager approves risky actions')
+    require(is_manager(db,u,t.team_id),'Only the team manager can review this step')
+    if t.state!='in_progress':raise HTTPException(409,'Ticket must be in progress')
     steps=list(t.runbook_steps or [])
     if not 0<=step_idx<len(steps):raise HTTPException(404)
+    require_step_unlocked(steps, step_idx)
     step={**steps[step_idx]}
     if step.get('status')!='waiting_approval':raise HTTPException(409,'No pending step approval')
-    step['approved_by']=u.id;step['status']='pending';steps[step_idx]=step;t.runbook_steps=steps
+    step.update(approved_by=u.id if approve else None, status='pending' if approve else 'returned')
+    steps[step_idx]=step
     if not any(s.get('status')=='waiting_approval' for s in steps):t.flags=[f for f in (t.flags or []) if f!='action_approval']
-    audit(db,'runbook_action_approved',t.team_id,t.id,u,{'step':step_idx})
+    if approve:
+        audit(db,'runbook_action_approved',t.team_id,t.id,u,{'step':step_idx})
+        return complete_step(db,t,u,steps,step_idx,step)
+    t.runbook_steps=steps
+    t.updated_at=now()
+    audit(db,'runbook_action_returned',t.team_id,t.id,u,{'step':step_idx})
+    activity(db,t.team_id,t.id,'runbook','Runbook step sent back: '+step.get('text',''))
     db.commit();return ticket_dict(t)
 
 

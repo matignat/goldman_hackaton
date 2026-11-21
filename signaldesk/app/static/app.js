@@ -247,14 +247,15 @@ async function openTicket(id,quiet=false){
   const rb=t.runbook_steps||[];
   const joined = t.members.some(member => member.id === state.me.id);
   const working = joined && t.state === 'in_progress';
-  const rbbody=rb.length?rb.map((s,i)=>`<div class="step-card" data-status="${e(s.status)}"><div class="step-circle">${s.status==='done'?'✓':i+1}</div><div><div class="step-title">${e(s.text)}</div><div class="step-meta">${e(pretty(s.type))} · ${e(pretty(s.status))}${s.approval==='required'?' · Manager approval required':''}</div><div class="step-actions">${t.permissions.can_work&&working&&!['waiting_approval','done'].includes(s.status)?`<button class="micro-btn" data-action="run-step" data-id="${t.id}" data-index="${i}">${s.status==='waiting_approval'?'Awaiting approval':'Complete / run'}</button>`:''}${t.permissions.can_manage&&s.status==='waiting_approval'?`<button class="micro-btn" data-action="approve-step" data-id="${t.id}" data-index="${i}">Manager approve</button>`:''}</div></div></div>`).join('')+(t.runbook_source?`<details><summary>Original ${e(t.runbook_format||'')} runbook source</summary><pre class="drawer-json">${e(t.runbook_source)}</pre></details>`:''):'<p class="empty-state">No runbook attached. The team manager can publish one and associate it with a rule.</p>';
+  const locked = index => t.approval_gate_index != null && index > t.approval_gate_index;
+  const rbbody=rb.length?rb.map((s,i)=>`<div class="step-card" data-status="${e(s.status)}"><div class="step-circle">${s.status==='done'?'✓':i+1}</div><div><div class="step-title">${e(s.text)}</div><div class="step-meta">${e(pretty(s.type))} · ${e(pretty(s.status))}${s.approval==='required'?' · Manager approval required':''}</div><div class="step-actions">${locked(i) && s.status!=='done' ? `<span class="field-hint">Waiting for approval and completion of step ${t.approval_gate_index + 1}</span>` : ''}${!locked(i)&&t.permissions.can_work&&working&&!['waiting_approval','done'].includes(s.status)?`<button class="micro-btn" data-action="run-step" data-id="${t.id}" data-index="${i}">Complete</button>`:''}${!locked(i)&&t.permissions.can_manage&&t.state==='in_progress'&&s.status==='waiting_approval'?`<button class="micro-btn" data-action="approve-step" data-id="${t.id}" data-index="${i}">Approve</button><button class="micro-btn" data-action="reject-step" data-id="${t.id}" data-index="${i}">Send back</button>`:''}</div></div></div>`).join('')+(t.runbook_source?`<details><summary>Original ${e(t.runbook_format||'')} runbook source</summary><pre class="drawer-json">${e(t.runbook_source)}</pre></details>`:''):'<p class="empty-state">No runbook attached. The team manager can publish one and associate it with a rule.</p>';
   const members=t.members?.length?t.members.map(m=>`<span class="soft-pill">${e(m.name)}</span>`).join(' '):'<span class="muted-inline">Nobody has joined yet</span>';
   let buttons=[];
   if(t.permissions.can_join)buttons.push(`<button class="btn btn-subtle" data-action="join-ticket" data-id="${t.id}">Join ticket</button>`);
   if(t.permissions.can_work&&t.type!=='change_request'){
     if(joined&&t.state==='new')buttons.push(`<button class="btn btn-subtle" data-action="move-ticket" data-id="${t.id}" data-state="acknowledged">Acknowledge</button>`);
     if(joined&&t.state==='acknowledged')buttons.push(`<button class="btn btn-subtle" data-action="move-ticket" data-id="${t.id}" data-state="in_progress">Start work</button>`);
-    if(t.state!=='done'&&t.state!=='archived'&&(t.permissions.can_manage||(working&&rb.every(step=>step.status==='done'))))buttons.push(`<button class="btn btn-primary" data-action="move-ticket" data-id="${t.id}" data-state="done">Mark Done · request approval</button>`);
+    if(t.state!=='done'&&t.state!=='archived'&&(t.permissions.can_manage||working)&&rb.every(step=>step.status==='done'))buttons.push(`<button class="btn btn-primary" data-action="move-ticket" data-id="${t.id}" data-state="done">Mark Done · request approval</button>`);
     if((t.flags||[]).includes('attention'))buttons.push(`<button class="btn btn-subtle" data-action="ack-attention" data-id="${t.id}">Seen · clear attention flag</button>`);
     buttons.push(`<button class="btn btn-subtle" data-action="add-member" data-id="${t.id}">Add member</button>`);
   }
@@ -307,7 +308,13 @@ async function userAction(el){
     if(action==='comment'){const value=$('ticket-comment-text').value;await api('/tickets/'+id+'/comment','POST',{comment:value});toast('Comment added');await refreshView();return}
     if(action==='ack-attention'){await api('/tickets/'+id+'/attention','POST');toast('Attention flag cleared');await refreshView();return}
     if(action==='run-step'){await api('/tickets/'+id+'/steps/'+el.dataset.index+'/run','POST');toast('Runbook step updated');await refreshView();return}
-    if(action==='approve-step'){await api('/tickets/'+id+'/steps/'+el.dataset.index+'/approve','POST');toast('Risky step approved by manager');await refreshView();return}
+    if(action==='approve-step'||action==='reject-step'){
+      const approve=action==='approve-step';
+      const ticket=await api('/tickets/'+id+'/steps/'+el.dataset.index+(approve?'/approve':'/reject'),'POST');
+      const failed=approve&&ticket.runbook_steps[el.dataset.index].status==='failed';
+      toast(failed?'Step approved, but execution failed':approve?'Step approved and completed':'Step sent back for changes',failed);
+      await refreshView();return;
+    }
     if(action==='new-rule'){state.ruleId=null;$('rule-editor-title').textContent='New routing rule';$('rule-json').value=safeJson(sampleRule);return}
     if(action==='edit-rule'){const rule=state.rules?.find(r=>r.id===id);if(rule){state.ruleId=id;$('rule-editor-title').textContent='Edit · '+rule.name;$('rule-json').value=safeJson(rule)}return}
     if(action==='save-rule'){const rule=readRuleEditor();if(state.ruleId)await api('/rules/'+state.ruleId,'PUT',rule);else await api('/rules','POST',rule);toast('Rule published; next event uses new version');await renderRules();return}
