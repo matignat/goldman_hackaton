@@ -61,5 +61,10 @@ def can_work(db,user,ticket):
 def can_approve_final(db,user,ticket):
     return is_manager(db,user,ticket.team_id) or is_maintainer(db,user,ticket.team_id)
 
+def can_approve_resolution(db,user,ticket):
+    if ticket.done_by == user.id:
+        return ticket.type in ('task', 'incident') and is_manager(db,user,ticket.team_id)
+    return can_approve_final(db,user,ticket)
+
 def require(condition,detail='Permission denied'):
     if not condition:raise HTTPException(403,detail)

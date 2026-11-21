@@ -82,19 +82,46 @@ def test_recovery_to_done_then_relapse_before_approval(login):
         assert 'relapse' in t.flags and t.occurrences==2
 
 
-def test_final_approval_is_distinct_and_self_approval_forbidden(login):
-    client=login(1)
+def test_manager_can_approve_own_incident(login):
+    client = login(1)
+    path = '/api/tickets/2'
+    assert client.post(path + '/move', json={'state': 'done'}).status_code == 200
+    ticket = client.get(path).json()
+    assert ticket['type'] == 'incident' and ticket['permissions']['can_approve']
+    assert client.post(path + '/approve').status_code == 200
+    with Session() as db:
+        incident = db.get(Ticket, 2)
+        assert (incident.state, incident.done_by, incident.approved_by) == ('archived', 1, 1)
+        assert incident.active_key is None
+
+
+def test_maintainer_needs_another_approver(login):
+    client=login(3)
     assert client.post('/api/tickets/2/move',json={'state':'done'}).status_code==200
     response=client.post('/api/tickets/2/approve')
     assert response.status_code==403 and 'Separation of duties' in response.text
-    client=login(3)  # Board maintainer with no manager role
+    client=login(1)  # Team manager approves the maintainer's resolution
     assert client.post('/api/tickets/2/approve').status_code==200
     with Session() as db:
         t=db.get(Ticket,2)
-        assert t.state=='archived' and t.active_key is None and t.approved_by==3
+        assert t.state=='archived' and t.active_key is None and t.approved_by==1
     client=login(2)
     assert client.get('/api/archive').status_code==403
     assert client.get('/api/tickets/2').status_code==403 # was not personally handling
+
+
+def test_team_manager_can_complete_and_approve_team_task(login):
+    client = login(2)
+    task = client.post('/api/tickets', json={'team_id': 1, 'title': 'Review thresholds'})
+    task.raise_for_status()
+    path = '/api/tickets/' + str(task.json()['id'])
+    client = login(1)
+    assert client.post(path + '/move', json={'state': 'done'}).status_code == 200
+    assert client.get(path).json()['permissions']['can_approve']
+    assert client.post(path + '/approve').status_code == 200
+    with Session() as db:
+        saved = db.get(Ticket, task.json()['id'])
+        assert (saved.state, saved.done_by, saved.approved_by) == ('archived', 1, 1)
 
 
 def test_risky_runbook_action_is_manager_only(login):

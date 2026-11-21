@@ -10,7 +10,7 @@
 | RUL-01–14 Nested Boolean rule conditions, runtime UI/API/config editing | **Implemented** | Manager-only CRUD/test and signed atomic file reload; template placeholder engine; no advanced design-preview diff |
 | FLD-01–08 Dedup 500 alerts and grouping/throttling | **Implemented** | 500-event integration test and instrument/5-minute log grouping; exact-duplicate notifications deduplicated |
 | FLD-12–15 Recovery and relapse | **Implemented** | explicit recovered event → Done/attention; relapse before approval → In progress |
-| BRD-01–12 Kanban, approvals, archive, coalesced recent activity | **Implemented** | 4 lanes, SSE, M/BM approve, no self-approval, manager critical archive/error toggle, audit and 40-item team activity; manager purge/tombstone |
+| BRD-01–12 Kanban, approvals, archive, coalesced recent activity | **Implemented** | 4 lanes, SSE, M/BM approve, team-manager self-approval for tasks and incidents, manager critical archive/error toggle, audit and 40-item team activity; manager purge/tombstone |
 | ORG-01–18 E/M/A/D and BM separation, manager and guest scopes | **Implemented core; partial extended visibility** | distinct server authorization; manager-only mutations; guest read-only; one-hop org tab; subordinate-board views and A oversight archive grants not complete |
 | TKT-01–29 Incident data, manual tasks, change requests, members, audit, history | **Implemented core** | ticket drawer, original/normalized event, step state, comments, archived handled-ticket direct access, distinct tasks/proposals, audit |
 | PRP-01–04 Manager proposal workflow and revision | **Implemented** | duplicate open-request block, manager rejection, revised resubmission, CHANGE ticket |

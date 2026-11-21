@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 from .database import init_db,Session as DBSession
 from .models import User,Team,Membership,Source,Rule,Runbook,Event,Ticket,Audit,Activity,Delivery,ChannelState,Proposal,BoardAccess,Policy,now
-from .auth import SIGNER,db_session,current_user,require,require_role,require_debug,is_member,is_manager,is_maintainer,is_guest,can_view_board,can_view_ticket,can_work,can_approve_final
+from .auth import SIGNER,db_session,current_user,require,require_role,require_debug,is_member,is_manager,is_maintainer,is_guest,can_view_board,can_view_ticket,can_work,can_approve_final,can_approve_resolution
 from .services.conditions import validate,matches,render,canonical
 from .services.runbooks import formats,actions
 from .services.ingestion import ingest
@@ -127,7 +127,7 @@ def ticket_detail(ticket_id:int,u:User=Depends(current_user),db:Session=Depends(
             'timeline':[row(a,['id','actor','action','detail','created_at']) for a in timeline],
             'deliveries':[row(d,['id','channel','user_id','kind','status','attempts','last_error']) for d in deliveries],
             'permissions':{'can_work':can_work(db,u,t) and t.state!='archived' and not is_guest(db,u,t.team_id),
-                           'can_approve':can_approve_final(db,u,t) and t.done_by!=u.id,
+                           'can_approve':can_approve_resolution(db,u,t),
                            'can_manage':is_manager(db,u,t.team_id),
                            'can_join':is_member(db,u,t.team_id) and u.id not in (t.members or [])},
             'members':[{'id':uid,'name':db.get(User,uid).name if db.get(User,uid) else 'Unknown'} for uid in (t.members or [])]}
@@ -190,7 +190,7 @@ def approve(ticket_id:int,u:User=Depends(current_user),db:Session=Depends(db_ses
     t=db.get(Ticket,ticket_id)
     if not t:raise HTTPException(404)
     require(t.type in ('task','incident') and t.state=='done' and can_approve_final(db,u,t),'Manager/maintainer approval required')
-    require(t.done_by!=u.id,'Separation of duties: the person marking Done cannot approve')
+    require(can_approve_resolution(db,u,t),'Separation of duties: the person marking Done cannot approve')
     t.state='archived';t.active_key=None;t.archived_at=now();t.updated_at=now();t.approved_by=u.id
     audit(db,'ticket_approved',t.team_id,t.id,u)
     activity(db,t.team_id,t.id,'approval','Approved and archived: '+t.title)
