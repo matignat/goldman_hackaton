@@ -9,12 +9,15 @@ from fastapi import (
     HTTPException,
     Response,
 )
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..auth import SIGNER, can_view_board, current_user, db_session, require
 from ..models import BoardAccess, Membership, Team, User
 from ..services.delivery import TICKET_CATEGORIES, channels, ticket_channels
+from ..services.records import audit
 from .presentation import row, team_dict
+from .profile_data import ProfileData
 
 router = APIRouter()
 
@@ -93,6 +96,22 @@ def me(u: User = Depends(current_user), db: Session = Depends(db_session)):
         "shared_teams": guest,
         "is_demo": os.getenv("DEMO_MODE", "1") == "1",
     }
+
+
+@router.put("/api/me/profile")
+def update_profile(
+    data: ProfileData, u: User = Depends(current_user), db: Session = Depends(db_session)
+):
+    """Update the authenticated user's own name and contact details."""
+    u.name, u.email, u.phone = data.name, data.email, data.phone
+    try:
+        db.flush()
+        audit(db, "profile_updated", actor=u)
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, "An employee with this name already exists")
+    return {"ok": True}
 
 
 @router.get("/api/teams")

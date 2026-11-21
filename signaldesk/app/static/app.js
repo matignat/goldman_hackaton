@@ -51,12 +51,15 @@ function setupIdentity(){
   const u=state.me;
   $('current-user').innerHTML=`<span class="user-avatar">${e(initials(u.name))}</span><span class="user-meta">${e(u.name)}<small>${e(u.debug_enabled?'Demo / debug':({E:'Employee',M:'Team manager',A:'Platform admin'}[u.role]||u.role))} · switch</small></span>`;
   $('app-shell').dataset.preset=u.preset||'engineer';
-  document.querySelectorAll('[data-nav-role="M"]').forEach(el=>el.hidden=u.role!=='M');
-  document.querySelectorAll('[data-nav-role="A"]').forEach(el=>el.hidden=u.role!=='A');
-  document.querySelectorAll('[data-nav-role="D"]').forEach(el=>el.hidden=!u.debug_enabled);
-  document.querySelectorAll('[data-nav-cap="triage"]').forEach(el=>el.hidden=!(u.role==='A'||u.role==='M'||u.debug_enabled));
-  if(u.role==='A'||u.debug_enabled){document.querySelectorAll('.nav-link').forEach(el=>{if(!['settings','organization',u.role==='A'?'admin':'debug','unmatched'].includes(el.dataset.view))el.hidden=true})}
-  else document.querySelectorAll('.nav-link').forEach(el=>{if(el.dataset.view==='admin'||el.dataset.view==='debug')el.hidden=true});
+  const restrictedViews = u.role === 'A' ? ['admin', 'employees', 'organization', 'settings', 'unmatched']
+    : u.debug_enabled ? ['debug', 'organization', 'settings', 'unmatched'] : null;
+  document.querySelectorAll('.nav-link').forEach(link => {
+    const {navRole, navCap, view} = link.dataset;
+    const roleAllowed = !navRole || (navRole === 'D' ? u.debug_enabled : navRole === u.role);
+    const canTriage = u.role === 'A' || u.role === 'M' || u.debug_enabled;
+    link.hidden = !roleAllowed || (navCap === 'triage' && !canTriage)
+      || (restrictedViews !== null && !restrictedViews.includes(view));
+  });
 }
 async function chooseTeam(value,refresh=true){
   deliveryPage = 1;
@@ -85,7 +88,7 @@ function navigate(view){
 }
 function connectSSE(){
   if(state.stream){state.stream.close();state.stream=null}
-  if(!state.me||['admin','debug','settings','organization'].includes(state.view))return;
+  if(!state.me||['admin','employees','debug','settings','organization'].includes(state.view))return;
   let stream=new EventSource('/api/stream'+(state.team?'?team='+state.team:''));state.stream=stream;
   stream.addEventListener('invalidate',()=>scheduleRefresh());
   stream.onopen=()=>{$('live-status').innerHTML='<span class="status-dot"></span> Live'};
@@ -100,7 +103,7 @@ async function refreshView(quiet=false){
       case 'archive':await renderArchive();break;case 'unmatched':await renderUnmatched();break;case 'rules':await renderRules();break;
       case 'runbooks':await renderRunbooks();break;case 'proposals':await renderProposals();break;case 'delivery':await renderDelivery(quiet);break;
       case 'organization':await renderOrganization();break;case 'settings':await renderSettings();break;
-      case 'admin':await renderAdmin();break;case 'debug':await renderDebug();break;
+      case 'employees':case 'admin':await renderAdmin();break;case 'debug':await renderDebug();break;
     }
     if(state.ticket)await openTicket(state.ticket,true);
   }catch(err){if(!quiet)toast(err.message,true)}
@@ -270,25 +273,69 @@ async function renderDeliveryLog(page){
 }
 async function renderOrganization(){
   const data=await api('/organization');
+  state.organization = data;
   const card=p=>p?`<div class="stack-item"><div class="stack-item-head"><h3>${e(p.name)}</h3><span class="soft-pill">${e(p.role)}</span></div><p>${e(p.email)}</p><p>${e(p.direct_reports)} direct reports</p></div>`:'<p class="empty-state">No direct manager in the organization tree.</p>';
   $('org-team-rosters').innerHTML=data.managed_teams.map(team=>{
-    const ids = new Set(team.members.map(member=>member.id));
-    const candidates = data.employees.filter(person=>!ids.has(person.id));
     const members = team.members.map(member=>`<li class="stack-item"><div class="stack-item-head"><span>${e(member.name)}</span>${member.id===team.leader_id?'Team manager':`<button class="btn btn-subtle" data-action="remove-team-member" data-team="${team.id}" data-id="${member.id}" aria-label="Remove ${e(member.name)} from ${e(team.name)}">Remove</button>`}</div></li>`).join('');
-    const add = candidates.length ? `<div class="form-actions"><label for="org-add-${team.id}">Employee</label><select id="org-add-${team.id}">${selectHtml(candidates.map(person=>[person.id,person.name]),null)}</select><button class="btn btn-primary" data-action="add-team-member" data-team="${team.id}">Add to team</button></div>` : '';
+    const add = `<button class="btn btn-primary" data-action="add-team-member" data-team="${team.id}">Add to team</button>`;
     return `<section class="panel panel-gap"><h2>${e(team.name)}</h2><ul class="stack-list">${members}</ul>${add}</section>`;
   }).join('');
   $('org-manager-card').innerHTML=card(data.manager);
   $('org-reports-list').innerHTML=data.reports.length?data.reports.map(card).join(''):'<p class="empty-state">No direct reports.</p>';
 }
+async function pickEmployee(team, employees) {
+  const picker = $('employee-picker');
+  const search = $('employee-search');
+  const list = $('employee-options');
+  const currentMembers = new Set(team.members.map(member => member.id));
+  const candidates = employees.filter(employee => !currentMembers.has(employee.id));
+  $('employee-picker-title').textContent = 'Add to ' + team.name;
+  search.value = '';
+  list.innerHTML = candidates.map(employee =>
+    `<li><button type="button" data-employee-id="${employee.id}">${e(employee.name)}</button></li>`
+  ).join('');
+  function filterEmployees() {
+    const query = search.value.trim().toLocaleLowerCase();
+    for (const item of list.children) {
+      item.hidden = !item.textContent.toLocaleLowerCase().includes(query);
+    }
+    const empty = $('employee-empty');
+    empty.textContent = candidates.length ? 'No employees match your search.' : 'All eligible employees are already on this team.';
+    empty.hidden = !!list.querySelector('li:not([hidden])');
+  }
+  filterEmployees();
+  search.oninput = filterEmployees;
+  picker.onclick = event => {
+    const choice = event.target.closest('[data-employee-id]');
+    if (choice) picker.close(choice.dataset.employeeId);
+    else if (event.target.closest('[data-dismiss-picker]')) picker.close();
+  };
+  picker.returnValue = '';
+  const closed = new Promise(resolve => picker.addEventListener('close', resolve, {once: true}));
+  picker.showModal();
+  await closed;
+  return candidates.find(employee => String(employee.id) === picker.returnValue);
+}
+
 async function renderSettings(){
   const m=state.me;
   $('settings-preset').value=m.preset||'engineer';$('settings-timezone').value=m.timezone||'Europe/Warsaw';
   $('preset-indicator').textContent='Current preset: '+pretty(m.preset||'engineer')+'. This never alters authorization.';
-  $('profile-card').innerHTML=`<div class="panel-head"><h2>Employee profile</h2><span class="soft-pill">${e(m.role)}${m.debug_enabled?' + D':''}</span></div><div class="stack-item"><div class="stack-item-head"><div class="user-avatar">${e(initials(m.name))}</div><h3>${e(m.name)}</h3></div><p>${e(m.email)}</p><p>${e(m.phone||'No phone')}</p></div><div class="data-kv panel-nested"><div><span>DELIVERY CHANNELS</span><strong>${e([...new Set(Object.values(m.ticket_channels).flat())].map(c=>m.available_channels[c]).join(', '))}</strong></div><div><span>TEAM MEMBERSHIP</span><strong>${myTeams().length} teams</strong></div><div><span>UI PRESET</span><strong>${e(pretty(m.preset))}</strong></div></div>`;
+  $('profile-card').innerHTML=`<div class="panel-head"><h2>Employee profile</h2><span class="soft-pill">${e(m.role)}${m.debug_enabled?' + D':''}</span></div><div class="stack-item"><div class="stack-item-head"><div class="user-avatar">${e(initials(m.name))}</div><h3>${e(m.name)}</h3></div><p>${e(m.email)}</p><p>${e(m.phone||'No phone')}</p><button class="btn btn-subtle" data-action="edit-profile">Edit personal details</button></div><div class="data-kv panel-nested"><div><span>DELIVERY CHANNELS</span><strong>${e([...new Set(Object.values(m.ticket_channels).flat())].map(c=>m.available_channels[c]).join(', '))}</strong></div><div><span>TEAM MEMBERSHIP</span><strong>${myTeams().length} teams</strong></div><div><span>UI PRESET</span><strong>${e(pretty(m.preset))}</strong></div></div>`;
+}
+function renderEmployees(staff) {
+  const names = new Map(staff.map(person => [person.id, person.name]));
+  $('admin-employees').innerHTML = staff.map(person =>
+    `<article class="stack-item" data-name="${e(person.name)}"><h3>${e(person.name)}</h3><p>Direct manager: ${e(names.get(person.manager_id) || 'Unassigned')}</p><div class="form-actions"><button class="btn btn-subtle" data-action="assign-direct-manager" data-id="${person.id}">Assign direct manager</button><button class="btn btn-danger" data-action="delete-employee" data-id="${person.id}">Delete employee</button></div></article>`
+  ).join('') || '<p class="empty-state">No employees yet.</p>';
 }
 async function renderAdmin(){
   const data=await api('/admin');
+  state.adminStaff = data.staff;
+  if (state.view === 'employees') {
+    renderEmployees(data.staff);
+    return;
+  }
   $('admin-metrics').innerHTML=Object.entries(data.metrics).slice(0,4).map(([name,val])=>`<article class="metric"><span class="metric-label">${e(pretty(name).toUpperCase())}</span><div class="metric-main"><strong>${val}</strong><span class="metric-symbol">⌁</span></div><span class="metric-caption">Persisted platform data</span></article>`).join('');
   $('admin-teams').innerHTML=data.teams.map(team=>{
     const members=new Set(team.members.map(member=>member.id));
@@ -297,7 +344,7 @@ async function renderAdmin(){
     const successors=data.staff.filter(person=>person.id!==team.leader_id);
     const add=available.length?`<div class="form-actions"><label for="admin-member-${team.id}">Employee</label><select id="admin-member-${team.id}">${choices(available)}</select><button class="btn btn-subtle" data-action="admin-add-member" data-team="${team.id}">Add to team</button></div>`:'';
     const promote=successors.length?`<div class="form-actions"><label for="admin-manager-${team.id}">New manager</label><select id="admin-manager-${team.id}">${choices(successors)}</select><button class="btn btn-primary" data-action="assign-manager" data-team="${team.id}" data-leader="${team.leader_id}">Assign manager</button></div>`:'';
-    return `<article class="stack-item" data-name="${e(team.name)}"><h3>${e(team.name)}</h3><p>Manager: ${e(team.leader_name)}</p><p>Members: ${team.members.map(member=>e(member.name)).join(', ')}</p>${add}${promote}</article>`;
+    return `<article class="stack-item" data-name="${e(team.name)}"><h3>${e(team.name)}</h3><p>Manager: ${e(team.leader_name)}</p><p>Members: ${team.members.map(member=>e(member.name)).join(', ')}</p>${add}${promote}<div class="form-actions"><button class="btn btn-danger" data-action="delete-team" data-id="${team.id}">Delete team</button></div></article>`;
   }).join('');
   $('admin-sources').innerHTML=`<table class="data-table"><thead><tr><th>Source</th><th>Adapter</th><th>Routing chain</th><th>State</th></tr></thead><tbody>${data.sources.map(s=>`<tr><td>${e(s.name)}<br><small>${e(s.slug)}</small></td><td>${e(s.type)}</td><td>${s.routing_chain?.map(id=>e(data.teams.find(t=>t.id===id)?.name||String(id))).join(' → ')||'All teams'}</td><td>${s.enabled?'Enabled':'Disabled'}</td></tr>`).join('')}</tbody></table>`;
 }
@@ -443,7 +490,57 @@ async function userAction(el){
       return;
     }
     if(action==='force-policy'){await api('/policies','POST',{team_id:state.team,severity:$('force-severity').value,channel:$('force-channel').value});toast('Mandatory team channel added');await renderDelivery(true);return}
+    if (action === 'edit-profile') {
+      let draft = state.me;
+      let error = '';
+      while (true) {
+        const fields = `
+          ${error ? `<p role="alert">${e(error)}</p>` : ''}
+          <label>Full name<input name="name" autocomplete="name" maxlength="100" value="${e(draft.name)}" required></label>
+          <label>Email<input name="email" type="email" autocomplete="email" maxlength="255" value="${e(draft.email)}" required></label>
+          <label>Phone (optional)<input name="phone" type="tel" autocomplete="tel" maxlength="50" value="${e(draft.phone)}"></label>`;
+        const form = await dialog('Edit personal details', fields, 'Save changes');
+        if (!form) return;
+        draft = Object.fromEntries(form);
+        try {
+          await api('/me/profile', 'PUT', draft);
+          break;
+        } catch (err) {
+          error = err.message;
+        }
+      }
+      state.me = await api('/me');
+      setupIdentity();
+      await renderSettings();
+      toast('Personal details saved');
+      return;
+    }
     if(action==='save-settings'){await api('/preferences','PUT',{preset:$('settings-preset').value,timezone:$('settings-timezone').value});state.me=await api('/me');$('app-shell').dataset.preset=state.me.preset;toast('Settings saved');await renderSettings();return}
+    if (action === 'create-team') {
+      const options = state.adminStaff.map(person => [person.id, person.name]);
+      const form = await dialog('Create team',
+        `<label>Team name<input name="name" maxlength="100" required></label>
+         <label for="new-team-lead">Team manager</label><select id="new-team-lead" name="leader_id" required><option value="">Choose a team manager</option>${selectHtml(options, null)}</select>
+         <p class="field-hint">The selected person joins the team as its manager.</p>`, 'Create team');
+      if (!form) return;
+      await api('/admin/teams', 'POST', {name: form.get('name'), leader_id: Number(form.get('leader_id'))});
+      await renderAdmin();
+      toast('Team created');
+      return;
+    }
+    if (action === 'assign-direct-manager') {
+      const person = state.adminStaff.find(user => user.id === id);
+      const managers = state.adminStaff.filter(user => user.role === 'M' && user.id !== id);
+      const options = [['', 'Unassigned'], ...managers.map(user => [user.id, user.name])];
+      const form = await dialog('Direct manager for ' + person.name,
+        `<label for="direct-manager-choice">Direct manager</label><select id="direct-manager-choice" name="manager_id">${selectHtml(options, person.manager_id ?? '')}</select>`, 'Save assignment');
+      if (!form) return;
+      const manager = form.get('manager_id');
+      await api('/admin/users/' + id + '/manager', 'PUT', {manager_id: manager ? Number(manager) : null});
+      await renderAdmin();
+      toast('Direct manager updated');
+      return;
+    }
     if(action==='admin-add-member'||action==='assign-manager'){
       const team=Number(el.dataset.team);
       if(action==='admin-add-member'){
@@ -459,6 +556,19 @@ async function userAction(el){
       }
       await renderAdmin();return;
     }
+    if (action === 'delete-team' || action === 'delete-employee') {
+      const team = action === 'delete-team';
+      const name = el.closest('article').dataset.name;
+      const label = team ? 'Delete team' : 'Delete employee';
+      const message = team
+        ? 'This permanently deletes the team, its tickets, rules, runbooks, policies and team history. Employees keep their accounts. Sources routed only to this team will be disabled.'
+        : 'This permanently deletes the employee account, team memberships, change requests and personal deliveries. Existing tickets are retained.';
+      if (!await dialog(label + ' ' + name + '?', `<p>${e(message)}</p>`, label)) return;
+      await api('/admin/' + (team ? 'teams/' : 'users/') + id, 'DELETE');
+      await renderAdmin();
+      toast(name + ' deleted');
+      return;
+    }
     if(action==='create-employee'){
       const fields = '<label>Full name<input name="name" maxlength="100" required></label><label>Email<input name="email" type="email" maxlength="255" required></label><label>Phone (optional)<input name="phone" type="tel" maxlength="50"></label>';
       const form = await dialog('Create employee',fields,'Create employee');
@@ -472,13 +582,16 @@ async function userAction(el){
     if(action==='add-team-member'||action==='remove-team-member'){
       const team=Number(el.dataset.team);
       const add=action==='add-team-member';
-      const user=add?Number($('org-add-'+team).value):id;
-      if(!add){
-        const roster=state.me.teams.find(item=>item.id===team);
-        const employee=roster.members.find(member=>member.id===user);
-        if(!await confirmDialog('Remove employee from team?', 'Remove '+employee.name+' from '+roster.name+'?'))return;
-      }
-      await api('/teams/'+team+'/members','POST',{user_id:user,action:add?'add':'remove'});
+      const roster = state.organization.managed_teams.find(item => item.id === team);
+      const employee = add
+        ? await pickEmployee(roster, state.organization.employees)
+        : roster.members.find(member => member.id === id);
+      if (!employee) return;
+      const confirmed = add
+        ? await dialog('Confirm team membership', `<p class="drawer-note">Do you want to add ${e(employee.name)} to the ${e(roster.name)} organization?</p>`, 'Add to team')
+        : await confirmDialog('Remove employee from team?', 'Remove '+employee.name+' from '+roster.name+'?');
+      if (!confirmed) return;
+      await api('/teams/'+team+'/members','POST',{user_id:employee.id,action:add?'add':'remove'});
       state.me=await api('/me');
       await renderOrganization();
       toast(add?'Employee added to team':'Employee removed from team');

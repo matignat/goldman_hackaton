@@ -3,20 +3,20 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#102b4d">
+  <meta name="theme-color" content="#102f4f">
   <title>SignalDesk · Incident operations</title>
-  <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+  <link rel="icon" type="image/x-icon" href="/assets/gs-favicon.ico">
   <link rel="stylesheet" href="/assets/styles.css">
 </head>
 <body>
 <div id="login-screen" class="login-screen" hidden>
   <main class="login-card" aria-labelledby="login-title">
-    <div class="login-emblem" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
-    <p class="eyebrow">INSTITUTIONAL OPERATIONS PLATFORM</p>
-    <h1 id="login-title">Clarity when it matters most.</h1>
-    <p class="login-copy">Monitor alerts, coordinate incidents and deliver the right response—all in one operational workspace.</p>
+    <a href="/" class="login-home" aria-label="SignalDesk home"><img class="login-emblem" src="/assets/gs-logo.svg" alt="Goldman Sachs" width="86" height="36"></a>
+    <p class="eyebrow">SIGNALDESK / DEMO WORKSPACE</p>
+    <h1 id="login-title">Incident operations.</h1>
+    <p class="login-copy">Choose a demo identity to monitor alerts, coordinate incidents and manage your team’s response.</p>
     <section aria-labelledby="personas-title" class="login-personas">
-      <div class="section-head"><h2 id="personas-title">Continue as a demo persona</h2><span class="demo-pill">DEMO ACCESS</span></div>
+      <div class="section-head"><h2 id="personas-title">Continue as a demo persona</h2></div>
       <div id="personas-list" class="personas-list"></div>
     </section>
     <p class="login-footnote">Demo identities are simulated. All permissions are enforced by the API.</p>
@@ -24,12 +24,12 @@
   <aside class="login-side" aria-label="Product description">
     <div class="side-kicker">SIGNALDESK / 2026</div>
     <div><div class="login-side-line"></div><h2>From signal<br>to resolution.</h2><p>One incident. One owner. An accountable path forward.</p></div>
-    <div class="login-side-bottom">EVENT INTELLIGENCE <span>→</span> ACTIONABLE OPERATIONS</div>
+    
   </aside>
 </div>
 <div id="app-shell" class="app-shell" hidden data-preset="engineer">
   <aside class="sidebar" aria-label="Application navigation">
-    <div class="brand-lockup"><div class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></div><div><div class="brand-name">signal<span>desk</span></div><div class="brand-caption">OPERATIONS INTELLIGENCE</div></div></div>
+    <a href="/" class="brand-lockup" aria-label="SignalDesk home"><img class="brand-mark" src="/assets/gs-logo.svg" alt="Goldman Sachs" width="86" height="36"><div><div class="brand-name">SignalDesk</div><div class="brand-caption">OPERATIONS INTELLIGENCE</div></div></a>
     <div class="workspace-label"><span class="workspace-line"></span> WORKSPACE / 01</div>
     <nav id="app-nav" aria-label="Main navigation">
       <div class="nav-section">OPERATIONS</div>
@@ -47,6 +47,7 @@
       <button class="nav-link" data-view="organization"><span class="nav-icon">♧</span><span>Organization</span></button>
       <button class="nav-link" data-view="settings"><span class="nav-icon">⚙</span><span>Profile & settings</span></button>
       <button class="nav-link" data-view="admin" data-nav-role="A"><span class="nav-icon">▥</span><span>Platform admin</span></button>
+      <button class="nav-link" data-view="employees" data-nav-role="A"><span class="nav-icon" aria-hidden="true">♧</span><span>Employees</span></button>
       <button class="nav-link" data-view="debug" data-nav-role="D"><span class="nav-icon">⌁</span><span>Demo / debug</span></button>
     </nav>
     <div class="sidebar-bottom"><div class="sidebar-health"><span class="status-dot"></span> Platform operational</div><div class="sidebar-version">SIGNALDESK <span>v1.0 · HACKATHON 2026</span></div></div>
@@ -79,8 +80,14 @@
       <section id="view-proposals" class="app-view" hidden><div class="page-header"><div><p class="eyebrow">CONFIGURATION / GOVERNANCE</p><h1>Change requests</h1><p class="page-subtitle">Propose changes to rules and runbooks; only team managers can publish.</p></div><button class="btn btn-primary" data-action="new-proposal">＋ Request change</button></div><div id="proposals-list" class="stack-list"></div></section>
       <section id="view-delivery" class="app-view" hidden><div class="page-header"><div><p class="eyebrow">CONFIGURATION / NOTIFICATION RELIABILITY</p><h1>Delivery & channels</h1><p class="page-subtitle">Personal delivery choices, policy overrides, retries and the durable outbox.</p></div></div><div class="split-content"><form id="delivery-preferences" class="panel form-grid"><div class="panel-head"><h2>My delivery preferences</h2></div><p class="field-hint">Choose at least one channel for each ticket type. Channels marked Required are selected by your team manager.</p><div id="ticket-channel-options" class="form-grid"></div><button class="btn btn-primary" data-action="save-preferences" type="button">Save preferences</button></form><div class="panel"><div class="panel-head"><h2>Manager-enforced channels</h2><span class="soft-pill">Cannot opt out</span></div><div id="delivery-forced-policies" class="stack-list"></div><div class="manager-only form-grid"><label for="force-severity">New mandatory channel</label><select id="force-severity" aria-label="Mandatory ticket type"></select><select id="force-channel" aria-label="Mandatory channel"></select><button class="btn btn-subtle" data-action="force-policy">Add team policy</button></div></div></div><div class="panel panel-gap"><div class="panel-head"><h2>Delivery log & simulated outbox</h2></div><div id="delivery-log" class="table-wrap"></div><nav id="delivery-pages" class="form-actions" aria-label="Delivery log pages" hidden><button type="button" class="btn btn-subtle" id="delivery-prev">Previous</button><span id="delivery-page-label" aria-live="polite"></span><button type="button" class="btn btn-subtle" id="delivery-next">Next</button></nav></div></section>
       <section id="view-organization" class="app-view" hidden><div class="page-header"><div><p class="eyebrow">WORKSPACE / REPORTING STRUCTURE</p><h1>Organization</h1><p class="page-subtitle">Your direct manager and immediate reports. Other levels are intentionally hidden.</p></div></div><div class="split-content"><div class="panel" id="org-manager"><div class="panel-head"><h2>My manager</h2></div><div id="org-manager-card"></div></div><div class="panel" id="org-subordinates-tree"><div class="panel-head"><h2>Direct reports</h2></div><div id="org-reports-list"></div><div id="org-subordinate-boards"></div></div></div><div id="org-team-rosters"></div></section>
-      <section id="view-settings" class="app-view" hidden><div class="page-header"><div><p class="eyebrow">WORKSPACE / PERSONALIZATION</p><h1>Profile & settings</h1><p class="page-subtitle">Control your presentation mode and review your explicit permissions.</p></div></div><div class="split-content"><div class="panel" id="profile-card"></div><div class="panel form-grid"><div class="panel-head"><h2>Presentation</h2></div><label for="settings-preset">UI preset</label><select id="settings-preset"><option value="engineer">Engineer · Kanban and full detail</option><option value="oncall">On-call · Prioritized workflow</option><option value="nonengineer">Non-engineer · Plain-language overview</option></select><label for="settings-timezone">Preferred timezone</label><input id="settings-timezone" value="Europe/Warsaw"><button class="btn btn-primary" data-action="save-settings">Save settings</button><p class="field-hint" id="preset-indicator">The preset changes presentation, not permissions.</p></div></div></section>
-      <section id="view-admin" class="app-view" hidden><div class="page-header"><div><p class="eyebrow">PLATFORM / CONFIGURATION</p><h1>Platform administration</h1><p class="page-subtitle">Operational health and source configuration. Debug controls are not available to administrators.</p></div></div><div class="page-actions"><button class="btn btn-primary" data-action="create-employee">Create employee</button></div><div class="metrics" id="admin-metrics"></div><section class="panel panel-gap"><h2>Team administration</h2><div id="admin-teams" class="stack-list"></div></section><div class="panel panel-gap"><div class="panel-head"><h2>Registered sources and routing chains</h2></div><div id="admin-sources"></div></div><div class="panel panel-gap form-grid"><div class="panel-head"><h2>Register a source</h2></div><label for="source-config">Source JSON</label><textarea class="code-area code-small" id="source-config" spellcheck="false">{"name":"New webhook","slug":"new-webhook","type":"webhook","routing_chain":[],"configuration":{}}</textarea><button class="btn btn-primary" data-action="create-source">Register source</button></div></section>
+      <section id="view-settings" class="app-view" hidden><div class="page-header"><div><p class="eyebrow">WORKSPACE / PERSONALIZATION</p><h1>Profile & settings</h1><p class="page-subtitle">Update your personal details and workspace preferences.</p></div></div><div class="split-content"><div class="panel" id="profile-card"></div><div class="panel form-grid"><div class="panel-head"><h2>Presentation</h2></div><label for="settings-preset">UI preset</label><select id="settings-preset"><option value="engineer">Engineer · Kanban and full detail</option><option value="oncall">On-call · Prioritized workflow</option><option value="nonengineer">Non-engineer · Plain-language overview</option></select><label for="settings-timezone">Preferred timezone</label><input id="settings-timezone" value="Europe/Warsaw"><button class="btn btn-primary" data-action="save-settings">Save settings</button><p class="field-hint" id="preset-indicator">The preset changes presentation, not permissions.</p></div></div></section>
+      <section id="view-admin" class="app-view" hidden><div class="page-header"><div><p class="eyebrow">PLATFORM / CONFIGURATION</p><h1>Platform administration</h1><p class="page-subtitle">Operational health and source configuration. Debug controls are not available to administrators.</p></div></div><div class="metrics" id="admin-metrics"></div><section class="panel panel-gap"><div class="panel-head"><h2>Team administration</h2><button class="btn btn-primary" data-action="create-team">Create team</button></div><div id="admin-teams" class="admin-card-grid"></div></section><div class="panel panel-gap"><div class="panel-head"><h2>Registered sources and routing chains</h2></div><div id="admin-sources"></div></div><div class="panel panel-gap form-grid"><div class="panel-head"><h2>Register a source</h2></div><label for="source-config">Source JSON</label><textarea class="code-area code-small" id="source-config" spellcheck="false">{"name":"New webhook","slug":"new-webhook","type":"webhook","routing_chain":[],"configuration":{}}</textarea><button class="btn btn-primary" data-action="create-source">Register source</button></div></section>
+      <section id="view-employees" class="app-view" hidden aria-labelledby="employees-title">
+        <div class="page-header"><div><p class="eyebrow">PLATFORM / ADMINISTRATION</p><h1 id="employees-title">Employees</h1></div>
+          <button class="btn btn-primary" data-action="create-employee">Add employee</button>
+        </div>
+        <div id="admin-employees" class="admin-card-grid"></div>
+      </section>
       <section id="view-debug" class="app-view" hidden><div class="page-header"><div><p class="eyebrow">ISOLATED DEMO ENVIRONMENT / DEBUG</p><h1>Scenario lab</h1><p class="page-subtitle">Generate real-pipeline events and simulate provider faults. Available only with the D capability.</p></div></div><div class="split-content"><div class="panel form-grid" id="debug-event-generator"><div class="panel-head"><h2>Inject a test event</h2><span class="soft-pill">REAL PIPELINE</span></div><label for="debug-fixture">Scenario</label><select id="debug-fixture"><option value="payments">Critical · payments error rate</option><option value="workflow">Settlement workflow failure</option><option value="trade">Large trade rejection</option><option value="recovery">Self-healing recovery</option><option value="unknown">Unmatched unknown schema</option></select><label for="debug-count">Occurrences</label><input type="number" id="debug-count" min="1" max="1000" value="1"><label for="debug-payload">Editable event JSON</label><textarea class="code-area" id="debug-payload" spellcheck="false"></textarea><button class="btn btn-primary" data-action="generate">Inject events</button></div><div class="panel"><div class="panel-head"><h2>Channel fault simulation</h2><span class="soft-pill">TEST SCOPE</span></div><div id="debug-channel-failure" class="stack-list"></div><div class="panel-head panel-nested"><h2>Processor health</h2></div><div id="debug-latency" class="data-kv"></div></div></div><div class="panel panel-gap"><div class="panel-head"><h2>Recent processing traces</h2></div><div id="debug-traces" class="table-wrap"></div></div></section>
     </main>
     <footer class="app-footer"><span>SignalDesk · Flexible Alerting & Notification Service</span><span>Built for accountable response · Demo environment</span></footer>
@@ -88,6 +95,19 @@
 </div>
 <div class="drawer-backdrop" id="drawer-backdrop" hidden data-action="close-ticket"></div>
 <aside class="ticket-drawer" id="ticket-detail" aria-label="Ticket details" aria-hidden="true" hidden><header class="drawer-head"><div><p class="eyebrow">INCIDENT / WORK ITEM</p><h2 id="ticket-summary">Ticket details</h2></div><button class="icon-button" aria-label="Close ticket" data-action="close-ticket">✕</button></header><div id="ticket-detail-content" class="drawer-content"><div id="ticket-alert-data"></div><div id="ticket-occurrences"></div><div id="ticket-runbook"></div><div id="ticket-steps"></div><div id="ticket-members"></div><div id="ticket-actions"></div><div id="ticket-timeline"></div><div id="ticket-comments"></div><div id="ticket-proposals"></div></div></aside>
+<dialog id="employee-picker" class="app-dialog" aria-labelledby="employee-picker-title">
+  <div class="dialog-heading">
+    <h2 id="employee-picker-title">Add to team</h2>
+    <button class="icon-button" type="button" aria-label="Close employee picker" data-dismiss-picker>✕</button>
+  </div>
+  <div class="employee-picker-body">
+    <label for="employee-search">Search employees</label>
+    <input id="employee-search" type="search" autocomplete="off" autofocus>
+    <ul id="employee-options" aria-label="Eligible employees"></ul>
+    <p id="employee-empty" role="status" hidden>No employees match your search.</p>
+  </div>
+  <div class="dialog-actions"><button class="btn btn-subtle" type="button" data-dismiss-picker>Cancel</button></div>
+</dialog>
 <dialog id="app-dialog" class="app-dialog" aria-labelledby="dialog-title"><form method="dialog"><div class="dialog-heading"><h2 id="dialog-title">Action</h2><button class="icon-button" value="cancel" formnovalidate aria-label="Close">✕</button></div><div id="dialog-body"></div><div class="dialog-actions"><button class="btn btn-subtle" value="cancel" formnovalidate>Cancel</button><button class="btn btn-primary" id="dialog-confirm" value="confirm">Confirm</button></div></form></dialog>
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 <script defer src="/assets/app.js"></script>

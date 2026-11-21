@@ -468,7 +468,16 @@ def test_semantic_markup_and_ui_assets(client):
     ):
         assert f'id="{id}"' in html
     assert "EventSource(" in js and "data-action" in html
-    assert "--gold:" in css and "--navy:" in css and "data-severity" in css
+    assert "data-severity" in css
+    for asset, source in [
+        ("gs-logo.svg", html),
+        ("gs-favicon.ico", html),
+        ("gs-sans.woff2", css),
+        ("gs-serif.woff2", css),
+    ]:
+        path = f"/assets/{asset}"
+        assert path in source
+        assert client.get(path).status_code == 200
 
 
 def test_task_policy_queues_external_channel_immediately(login):

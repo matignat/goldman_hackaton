@@ -60,6 +60,15 @@ class User(Base):
     debug_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
+class ExplicitManagerAssignment(Base):
+    """Staff whose reporting line is set by an administrator instead of team membership."""
+
+    __tablename__ = "explicit_manager_assignments"
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+
+
 class SeverityPreferences(Base):
     __tablename__ = "user_severity_preferences"
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True)

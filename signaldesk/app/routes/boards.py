@@ -51,6 +51,8 @@ async def stream(team: int | None = None, u: User = Depends(current_user)):
         while True:
             with DBSession() as db:
                 user = db.get(User, uid)
+                if user is None:
+                    return
                 ids = [t.id for t in db.query(Team) if can_view_board(db, user, t.id)]
                 if team is not None:
                     ids = [team] if team in ids else []
