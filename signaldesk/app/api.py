@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from .database import init_db,Session as DBSession
-from .models import User,Team,Membership,Source,Rule,Runbook,Event,Ticket,Audit,Activity,Delivery,ChannelState,Proposal,BoardAccess,Policy,now
+from .models import PreferredChannel,User,Team,Membership,Source,Rule,Runbook,Event,Ticket,Audit,Activity,Delivery,ChannelState,Proposal,BoardAccess,Policy,now
 from .auth import SIGNER,db_session,current_user,require,require_role,require_debug,is_member,is_manager,is_maintainer,is_guest,can_view_board,can_view_ticket,can_work,can_approve_final,can_approve_resolution
 from .services.conditions import validate,matches,render,canonical
 from .services.runbooks import formats,actions
@@ -76,7 +76,7 @@ def me(u:User=Depends(current_user),db:Session=Depends(db_session)):
     myteams=[team_dict(db,db.get(Team,m.team_id)) for m in db.query(Membership).filter_by(user_id=u.id)]
     managed=[team_dict(db,t) for t in db.query(Team).filter_by(leader_id=u.id) if t.id not in {x['id'] for x in myteams}]
     guest=[team_dict(db,db.get(Team,g.team_id)) for g in db.query(BoardAccess).filter_by(user_id=u.id,status='approved') if g.team_id not in {x['id'] for x in myteams+managed}]
-    return {**row(u,['id','name','role','email','phone','manager_id','primary_channel','backup_channel','subscriptions','schedule','buffer_seconds','preset','timezone','debug_enabled']),
+    return {**row(u,['id','name','role','email','phone','manager_id','primary_channel','backup_channel','preferred_channels','subscriptions','schedule','buffer_seconds','preset','timezone','debug_enabled']),
             'teams':myteams+managed,'shared_teams':guest,'is_demo':os.getenv('DEMO_MODE','1')=='1'}
 
 @app.get('/api/teams')
@@ -177,6 +177,17 @@ def move(ticket_id:int,data:dict=Body(...),u:User=Depends(current_user),db:Sessi
     require(t.type in ('incident','task') and t.state!='archived' and can_work(db,u,t) and not is_guest(db,u,t.team_id))
     dest=data.get('state')
     if dest not in ('acknowledged','in_progress','done'):raise HTTPException(422,'Invalid target state')
+    if t.state=='done' and dest=='done':
+        return ticket_dict(t)
+    if dest in ('acknowledged','in_progress'):
+        require(u.id in (t.members or []), 'Join the ticket before starting its workflow')
+        previous = 'new' if dest=='acknowledged' else 'acknowledged'
+        if t.state != previous:
+            raise HTTPException(409, 'Acknowledge the ticket before starting work')
+    if dest=='done' and not is_manager(db,u,t.team_id):
+        require(u.id in (t.members or []), 'Join the ticket before marking it Done')
+        if t.state!='in_progress' or any(step.get('status')!='done' for step in t.runbook_steps or []):
+            raise HTTPException(409, 'Start work and complete every runbook step before marking the ticket Done')
     if t.state=='done' and dest!='done':raise HTTPException(409,'Only rejection or relapse reopens Done')
     old=t.state;t.state=dest;t.updated_at=now()
     if u.id not in (t.members or []):t.members=[*(t.members or []),u.id]
@@ -233,6 +244,9 @@ def run_step(ticket_id:int,step_idx:int,u:User=Depends(current_user),db:Session=
     t=db.get(Ticket,ticket_id)
     if not t:raise HTTPException(404)
     require(can_work(db,u,t) and t.state!='archived' and not is_guest(db,u,t.team_id))
+    require(u.id in (t.members or []), 'Join the ticket before running a step')
+    if t.state!='in_progress':
+        raise HTTPException(409, 'Acknowledge the ticket and start work before running a step')
     steps=list(t.runbook_steps or [])
     if not 0<=step_idx<len(steps):raise HTTPException(404,'Step not found')
     step={**steps[step_idx]}
@@ -486,10 +500,17 @@ def preferences(data:dict=Body(...),u:User=Depends(current_user),db:Session=Depe
     primary=data.get('primary_channel',u.primary_channel)
     backup=data.get('backup_channel',u.backup_channel)
     available={'email','sms','phone','ui'}
-    if primary not in available or backup not in available or primary==backup:raise HTTPException(422,'Select two distinct active channels')
-    if 'email' in (primary,backup) and not u.email:raise HTTPException(422,'Email address missing')
-    if 'sms' in (primary,backup) or 'phone' in (primary,backup):
+    if not isinstance(primary, str) or not isinstance(backup, str) or primary not in available or backup not in available or primary==backup:raise HTTPException(422,'Select two distinct active channels')
+    reserved = {primary, backup}
+    extras = data.get('preferred_channels', [c for c in u.preferred_channels if c not in reserved])
+    if not isinstance(extras, list) or any(not isinstance(c, str) or c not in available - reserved for c in extras):
+        raise HTTPException(422, 'Additional channels must be available and different from primary and backup')
+    selected = reserved.union(extras)
+    if 'email' in selected and not u.email:raise HTTPException(422,'Email address missing')
+    if selected.intersection({'sms', 'phone'}):
         if not u.phone:raise HTTPException(422,'Phone number missing')
+    existing = {item.channel: item for item in u.extra_channels}
+    u.extra_channels = [existing.get(c) or PreferredChannel(channel=c) for c in sorted(set(extras))]
     u.primary_channel=primary;u.backup_channel=backup
     if 'schedule' in data:
         sch=data['schedule']

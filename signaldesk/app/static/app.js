@@ -90,7 +90,7 @@ async function refreshView(quiet=false){
     switch(state.view){
       case 'board':await renderBoard();break;case 'activity':await renderActivity();break;case 'tickets':await renderTickets();break;
       case 'archive':await renderArchive();break;case 'unmatched':await renderUnmatched();break;case 'rules':await renderRules();break;
-      case 'runbooks':await renderRunbooks();break;case 'proposals':await renderProposals();break;case 'delivery':await renderDelivery();break;
+      case 'runbooks':await renderRunbooks();break;case 'proposals':await renderProposals();break;case 'delivery':await renderDelivery(quiet);break;
       case 'organization':await renderOrganization();break;case 'access':await renderAccess();break;case 'settings':await renderSettings();break;
       case 'admin':await renderAdmin();break;case 'debug':await renderDebug();break;
     }
@@ -168,10 +168,35 @@ async function renderProposals(){
   const items=await api('/proposals');
   $('proposals-list').innerHTML=items.length?items.map(p=>`<article class="panel"><div class="stack-item-head"><div><h3>CHANGE #${p.id} · ${e(p.target_type)} ${p.target_id?'#'+p.target_id:'(new)'}</h3><p class="field-hint">${e(teamName(p.team_id))} · requested by ${e(findName(p.requester_id))} · ${e(fmtTime(p.created_at))}</p></div><span class="soft-pill">${e(p.status.toUpperCase())}</span></div><p class="drawer-note">${e(p.description)}</p>${p.comment?`<p class="drawer-note"><strong>Manager decision:</strong> ${e(p.comment)}</p>`:''}${p.revised_from?`<p class="field-hint">Revision of request #${p.revised_from}</p>`:''}${isManager()&&p.status==='open'?`<div class="form-actions"><button class="btn btn-subtle" data-action="proposal-decision" data-id="${p.id}" data-decision="accepted">Accept</button><button class="btn btn-danger" data-action="proposal-decision" data-id="${p.id}" data-decision="rejected">Reject</button><button class="btn btn-primary" data-action="proposal-decision" data-id="${p.id}" data-decision="implemented">Implemented</button></div>`:''}</article>`).join(''):'<div class="panel empty-state">No change requests yet. Submit an enhancement proposal for your team manager.</div>';
 }
-async function renderDelivery(){
+function selectedPreferredChannels(){
+  return Array.from($('preferred-channel-options').querySelectorAll('input:checked'), input => input.value);
+}
+function showPreferredChannels(selected){
+  const primary = $('primary-channel');
+  const reserved = [primary.value, $('backup-channel').value];
+  const choices = Array.from(primary.options).filter(option => !reserved.includes(option.value));
+  $('preferred-channel-options').replaceChildren(...choices.map(option => {
+    const label = document.createElement('label');
+    label.className = 'check-label';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.value = option.value;
+    input.checked = selected.includes(option.value);
+    label.append(input, option.textContent);
+    return label;
+  }));
+}
+for (const id of ['primary-channel', 'backup-channel']) {
+  $(id).addEventListener('change', () => showPreferredChannels(selectedPreferredChannels()));
+}
+
+async function renderDelivery(quiet=false){
   const m=state.me;
-  $('primary-channel').value=m.primary_channel;$('backup-channel').value=m.backup_channel;
-  $('schedule-start').value=m.schedule?.start||'00:00';$('schedule-end').value=m.schedule?.end||'23:59';$('schedule-timezone').value=m.schedule?.timezone||'UTC';$('buffer-seconds').value=m.buffer_seconds||0;
+  if (!quiet) {
+    $('primary-channel').value=m.primary_channel;$('backup-channel').value=m.backup_channel;
+    showPreferredChannels(m.preferred_channels || []);
+    $('schedule-start').value=m.schedule?.start||'00:00';$('schedule-end').value=m.schedule?.end||'23:59';$('schedule-timezone').value=m.schedule?.timezone||'UTC';$('buffer-seconds').value=m.buffer_seconds||0;
+  }
   const pol=state.team?await api('/policies?team='+state.team):[];
   $('delivery-forced-policies').innerHTML=pol.length?pol.map(p=>`<div class="stack-item"><h3>${e(pretty(p.severity))} · ${e(pretty(p.channel))}</h3><p>Applies to ${e(p.target)} · ${e(pretty(p.kind))}. Team manager policy.</p></div>`).join(''):'<p class="empty-state">No additional manager-enforced channels for this team.</p>';
   const logs=await api('/delivery');
@@ -220,14 +245,16 @@ async function openTicket(id,quiet=false){
   const raw=`<details><summary>First event · complete original payload</summary><pre class="drawer-json">${e(safeJson(t.first_payload))}</pre></details><details><summary>Latest event · complete original payload</summary><pre class="drawer-json">${e(safeJson(t.latest_payload))}</pre></details>`;
   const occurrences=t.type==='incident'?`${t.occurrences} occurrences · ${e(fmtTime(t.last_occurrence_at))}<details><summary>Recent occurrence samples (up to 20)</summary><pre class="drawer-json">${e(safeJson(t.samples))}</pre></details>`:'Not applicable to manual tasks or change requests.';
   const rb=t.runbook_steps||[];
-  const rbbody=rb.length?rb.map((s,i)=>`<div class="step-card" data-status="${e(s.status)}"><div class="step-circle">${s.status==='done'?'✓':i+1}</div><div><div class="step-title">${e(s.text)}</div><div class="step-meta">${e(pretty(s.type))} · ${e(pretty(s.status))}${s.approval==='required'?' · Manager approval required':''}</div><div class="step-actions">${t.permissions.can_work&&s.status!=='done'?`<button class="micro-btn" data-action="run-step" data-id="${t.id}" data-index="${i}">${s.status==='waiting_approval'?'Awaiting approval':'Complete / run'}</button>`:''}${t.permissions.can_manage&&s.status==='waiting_approval'?`<button class="micro-btn" data-action="approve-step" data-id="${t.id}" data-index="${i}">Manager approve</button>`:''}</div></div></div>`).join('')+(t.runbook_source?`<details><summary>Original ${e(t.runbook_format||'')} runbook source</summary><pre class="drawer-json">${e(t.runbook_source)}</pre></details>`:''):'<p class="empty-state">No runbook attached. The team manager can publish one and associate it with a rule.</p>';
+  const joined = t.members.some(member => member.id === state.me.id);
+  const working = joined && t.state === 'in_progress';
+  const rbbody=rb.length?rb.map((s,i)=>`<div class="step-card" data-status="${e(s.status)}"><div class="step-circle">${s.status==='done'?'✓':i+1}</div><div><div class="step-title">${e(s.text)}</div><div class="step-meta">${e(pretty(s.type))} · ${e(pretty(s.status))}${s.approval==='required'?' · Manager approval required':''}</div><div class="step-actions">${t.permissions.can_work&&working&&!['waiting_approval','done'].includes(s.status)?`<button class="micro-btn" data-action="run-step" data-id="${t.id}" data-index="${i}">${s.status==='waiting_approval'?'Awaiting approval':'Complete / run'}</button>`:''}${t.permissions.can_manage&&s.status==='waiting_approval'?`<button class="micro-btn" data-action="approve-step" data-id="${t.id}" data-index="${i}">Manager approve</button>`:''}</div></div></div>`).join('')+(t.runbook_source?`<details><summary>Original ${e(t.runbook_format||'')} runbook source</summary><pre class="drawer-json">${e(t.runbook_source)}</pre></details>`:''):'<p class="empty-state">No runbook attached. The team manager can publish one and associate it with a rule.</p>';
   const members=t.members?.length?t.members.map(m=>`<span class="soft-pill">${e(m.name)}</span>`).join(' '):'<span class="muted-inline">Nobody has joined yet</span>';
   let buttons=[];
   if(t.permissions.can_join)buttons.push(`<button class="btn btn-subtle" data-action="join-ticket" data-id="${t.id}">Join ticket</button>`);
   if(t.permissions.can_work&&t.type!=='change_request'){
-    if(t.state==='new')buttons.push(`<button class="btn btn-subtle" data-action="move-ticket" data-id="${t.id}" data-state="acknowledged">Acknowledge</button>`);
-    if(['new','acknowledged'].includes(t.state))buttons.push(`<button class="btn btn-subtle" data-action="move-ticket" data-id="${t.id}" data-state="in_progress">Start work</button>`);
-    if(t.state!=='done'&&t.state!=='archived')buttons.push(`<button class="btn btn-primary" data-action="move-ticket" data-id="${t.id}" data-state="done">Mark Done · request approval</button>`);
+    if(joined&&t.state==='new')buttons.push(`<button class="btn btn-subtle" data-action="move-ticket" data-id="${t.id}" data-state="acknowledged">Acknowledge</button>`);
+    if(joined&&t.state==='acknowledged')buttons.push(`<button class="btn btn-subtle" data-action="move-ticket" data-id="${t.id}" data-state="in_progress">Start work</button>`);
+    if(t.state!=='done'&&t.state!=='archived'&&(t.permissions.can_manage||(working&&rb.every(step=>step.status==='done'))))buttons.push(`<button class="btn btn-primary" data-action="move-ticket" data-id="${t.id}" data-state="done">Mark Done · request approval</button>`);
     if((t.flags||[]).includes('attention'))buttons.push(`<button class="btn btn-subtle" data-action="ack-attention" data-id="${t.id}">Seen · clear attention flag</button>`);
     buttons.push(`<button class="btn btn-subtle" data-action="add-member" data-id="${t.id}">Add member</button>`);
   }
@@ -235,7 +262,7 @@ async function openTicket(id,quiet=false){
   if(t.state==='done'&&t.type!=='change_request'&&t.done_by===state.me.id&&!t.permissions.can_approve&&isManager())buttons.push('<span class="field-hint">Self-approval is prohibited. Another manager/maintainer must approve.</span>');
   const timeline=(t.timeline||[]).slice().reverse().map(a=>`<li class="timeline-item"><strong>${e(pretty(a.action))}</strong> · ${e(a.actor)}<div>${e(Object.entries(a.detail||{}).map(([k,v])=>k+': '+(typeof v==='object'?JSON.stringify(v):v)).join(' · ').slice(0,320))}</div><time>${e(fmtTime(a.created_at))}</time></li>`).join('');
   if(t.state==='archived'&&t.permissions.can_manage)buttons.push(`<button class="btn btn-danger" data-action="purge-ticket" data-id="${t.id}">Purge archived ticket</button>`);
-  $('ticket-detail-content').innerHTML=drawerSection('ticket-summary-section','Ticket summary',details)+drawerSection('ticket-alert-data','Original event data',raw)+drawerSection('ticket-occurrences','Occurrence history',occurrences)+drawerSection('ticket-runbook','Runbook · next steps',rbbody)+drawerSection('ticket-members','Ticket members',members)+drawerSection('ticket-actions','Available actions',`<div class="drawer-actions">${buttons.join('')||'<span class="muted-inline">Read-only ticket.</span>'}</div>`)+drawerSection('ticket-timeline','Audit timeline',`<ol class="timeline-list">${timeline||'<li class="empty-state">No updates</li>'}</ol>`)+(t.state==='archived'?'':drawerSection('ticket-comments','Add a comment',`<textarea class="comment-box" id="ticket-comment-text" placeholder="Add context for your team..."></textarea><button class="btn btn-subtle" data-action="comment" data-id="${t.id}">Post comment</button>`))+drawerSection('ticket-proposals','Delivery status',`<p class="field-hint">${(t.deliveries||[]).map(d=>`${e(d.channel)}: ${e(d.status)}`).join(' · ')||'No delivery records yet'}</p>`);
+  $('ticket-detail-content').innerHTML=drawerSection('ticket-summary-section','Ticket summary',details)+drawerSection('ticket-actions','Available actions',`<div class="drawer-actions">${buttons.join('')||'<span class="muted-inline">Read-only ticket.</span>'}</div>`)+drawerSection('ticket-alert-data','Original event data',raw)+drawerSection('ticket-occurrences','Occurrence history',occurrences)+drawerSection('ticket-runbook','Runbook · next steps',rbbody)+drawerSection('ticket-members','Ticket members',members)+drawerSection('ticket-timeline','Audit timeline',`<ol class="timeline-list">${timeline||'<li class="empty-state">No updates</li>'}</ol>`)+(t.state==='archived'?'':drawerSection('ticket-comments','Add a comment',`<textarea class="comment-box" id="ticket-comment-text" placeholder="Add context for your team..."></textarea><button class="btn btn-subtle" data-action="comment" data-id="${t.id}">Post comment</button>`))+drawerSection('ticket-proposals','Delivery status',`<p class="field-hint">${(t.deliveries||[]).map(d=>`${e(d.channel)}: ${e(d.status)}`).join(' · ')||'No delivery records yet'}</p>`);
 }
 function closeTicket(){state.ticket=null;$('drawer-backdrop').hidden=true;$('ticket-detail').hidden=true;$('ticket-detail').setAttribute('aria-hidden','true')}
 function dialog(title,fields,confirmText='Confirm'){
@@ -299,7 +326,7 @@ async function userAction(el){
       await api('/proposals/'+id+'/decision','POST',{decision,comment});toast('Change request '+decision);await renderProposals();return;
     }
     if(action==='save-preferences'){
-      await api('/preferences','PUT',{primary_channel:$('primary-channel').value,backup_channel:$('backup-channel').value,buffer_seconds:Number($('buffer-seconds').value),schedule:{timezone:$('schedule-timezone').value,start:$('schedule-start').value,end:$('schedule-end').value}});
+      await api('/preferences','PUT',{primary_channel:$('primary-channel').value,backup_channel:$('backup-channel').value,preferred_channels:selectedPreferredChannels(),buffer_seconds:Number($('buffer-seconds').value),schedule:{timezone:$('schedule-timezone').value,start:$('schedule-start').value,end:$('schedule-end').value}});
       state.me=await api('/me');toast('Delivery preferences updated');return;
     }
     if(action==='force-policy'){await api('/policies','POST',{team_id:state.team,severity:$('force-severity').value,channel:$('force-channel').value});toast('Mandatory team channel added');await renderDelivery();return}

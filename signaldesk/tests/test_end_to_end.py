@@ -8,6 +8,25 @@ from app.services.delivery import process_deliveries,RETRY_SECONDS
 from app.services.conditions import matches,canonical,validate
 
 
+def test_additional_channels_are_optional_and_deliver_once(login):
+    client = login(2)
+    assert client.get('/api/me').json()['preferred_channels'] == []
+    settings = {'preferred_channels': ['sms', 'phone', 'sms']}
+    assert client.put('/api/preferences', json=settings).status_code == 200
+    assert client.put('/api/preferences', json={'timezone': 'UTC'}).status_code == 200
+    assert client.get('/api/me').json()['preferred_channels'] == ['phone', 'sms']
+    for invalid in (['email'], ['ui'], ['unknown'], 'sms'):
+        assert client.put('/api/preferences', json={'preferred_channels': invalid}).status_code == 422
+    task = client.post('/api/tickets', json={'team_id': 1, 'title': 'Delivery check'}).json()
+    with Session() as db:
+        jobs = db.query(Delivery).filter_by(user_id=2, ticket_id=task['id'], kind='new_ticket').all()
+        assert sorted((job.channel, job.is_primary) for job in jobs) == [
+            ('phone', False), ('sms', False), ('ui', True)]
+    assert client.put('/api/preferences', json={'preferred_channels': []}).status_code == 200
+    profile = client.get('/api/me').json()
+    assert (profile['primary_channel'], profile['backup_channel'], profile['preferred_channels']) == ('ui', 'email', [])
+
+
 def test_seed_matches_all_appendix_schemas_and_falls_through_teams():
     with Session() as db:
         events=db.query(Event).order_by(Event.id).all()
@@ -95,7 +114,24 @@ def test_manager_can_approve_own_incident(login):
         assert incident.active_key is None
 
 
+def complete_runbook(login, ticket_id, worker):
+    client = login(worker)
+    path = f'/api/tickets/{ticket_id}'
+    ticket = client.get(path).json()
+    if ticket['state'] == 'acknowledged':
+        assert client.post(path + '/move', json={'state': 'in_progress'}).status_code == 200
+    assert client.post(path + '/move', json={'state': 'done'}).status_code == 409
+    for index, step in enumerate(ticket['runbook_steps']):
+        url = f'{path}/steps/{index}'
+        assert client.post(url + '/run').status_code == 200
+        if step.get('approval') == 'required':
+            assert login(1).post(url + '/approve').status_code == 200
+            client = login(worker)
+            assert client.post(url + '/run').status_code == 200
+
+
 def test_maintainer_needs_another_approver(login):
+    complete_runbook(login, 2, 3)
     client=login(3)
     assert client.post('/api/tickets/2/move',json={'state':'done'}).status_code==200
     response=client.post('/api/tickets/2/approve')
@@ -125,7 +161,11 @@ def test_team_manager_can_complete_and_approve_team_task(login):
 
 
 def test_risky_runbook_action_is_manager_only(login):
+    manager = login(1)
+    assert manager.post('/api/tickets/1/steps/0/run').status_code == 403
     client=login(2)
+    assert client.post('/api/tickets/1/steps/2/run').status_code == 409
+    assert client.post('/api/tickets/1/move', json={'state':'in_progress'}).status_code == 200
     assert client.post('/api/tickets/1/steps/2/run').status_code==200
     with Session() as db:
         t=db.get(Ticket,1)
@@ -162,7 +202,7 @@ def test_manager_only_rule_runbook_and_proposals(login):
 
 
 def test_archive_critical_only_default_toggle_errors_and_handled_history(login):
-    client=login(2)
+    client=login(1)
     assert client.post('/api/tickets/1/move',json={'state':'done'}).status_code==200
     client=login(1)
     assert client.post('/api/tickets/1/approve').status_code==200
@@ -324,6 +364,7 @@ def test_manager_signed_live_rule_config_is_atomic_and_auth_checked(login,tmp_pa
 
 
 def test_explicit_manager_only_history_purge_retains_tombstone(login):
+    complete_runbook(login, 1, 2)
     client=login(2)
     assert client.post('/api/tickets/1/move',json={'state':'done'}).status_code==200
     client=login(1)

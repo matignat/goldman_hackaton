@@ -122,7 +122,9 @@ def queue_ticket(db,ticket,kind='new_ticket',extra_users=None):
         forced={p.channel for p in applicable}
         mandatory=set(routing.get('mandatory_channels',[]))
         channels=forced|mandatory
-        if not blocked:channels.add(user.primary_channel)
+        if not blocked:
+            channels.add(user.primary_channel)
+            channels.update(user.preferred_channels)
         summary={'title':ticket.title,'body':f'{ticket.body}\nTicket #{ticket.id}\nRunbook: /#ticket-{ticket.id}',
                  'ticket_id':ticket.id,'count':ticket.occurrences,'kind':kind}
         for channel in channels:

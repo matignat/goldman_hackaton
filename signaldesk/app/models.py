@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from sqlalchemy import String, Text, Integer, BigInteger, ForeignKey, Boolean, DateTime, Index, UniqueConstraint, JSON
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .database import Base
 
 def now(): return datetime.now(timezone.utc)
@@ -15,12 +15,26 @@ class User(Base):
     manager_id: Mapped[int|None] = mapped_column(ForeignKey('users.id'), nullable=True)
     primary_channel: Mapped[str] = mapped_column(String(20), default='ui')
     backup_channel: Mapped[str] = mapped_column(String(20), default='email')
+    extra_channels: Mapped[list["PreferredChannel"]] = relationship(
+        cascade="all, delete-orphan", lazy="selectin", order_by="PreferredChannel.channel"
+    )
+
+    @property
+    def preferred_channels(self):
+        return [item.channel for item in self.extra_channels]
+
     subscriptions: Mapped[dict] = mapped_column(JSON, default=dict)
     schedule: Mapped[dict] = mapped_column(JSON, default=lambda:{'timezone':'UTC','start':'00:00','end':'23:59'})
     buffer_seconds: Mapped[int] = mapped_column(Integer, default=0)
     preset: Mapped[str] = mapped_column(String(24), default='engineer')
     timezone: Mapped[str] = mapped_column(String(48), default='Europe/Warsaw')
     debug_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+
+class PreferredChannel(Base):
+    __tablename__ = 'user_preferred_channels'
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), primary_key=True)
+    channel: Mapped[str] = mapped_column(String(20), primary_key=True)
+
 
 class Team(Base):
     __tablename__ = 'teams'
