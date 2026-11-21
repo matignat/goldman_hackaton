@@ -75,7 +75,8 @@ See `docs/ARCHITECTURE.md` for boundaries, deployment topology and the horizonta
 
 ```text
 app/
-  api.py                protected REST + SSE
+  api.py                FastAPI entry point and router registration
+  routes/               protected REST and SSE handlers grouped by domain
   auth.py               role/team/ticket capability checks
   models.py             durable entity model and indexes
   database.py           transactional SQLAlchemy engine
